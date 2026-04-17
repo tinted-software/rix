@@ -1,0 +1,18 @@
+[package]
+name = "rix-parser"
+version = "0.1.0"
+description = "A Nix parser written in Rust"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/tinted-software/rix"
+
+[[bench]]
+harness = false
+name = "all-packages"
+
+[dependencies]
+rowan = "0.16"
+
+[dev-dependencies]
+criterion = "0.8"
+expect-test = "1.5.1"
