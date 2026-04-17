@@ -381,7 +381,7 @@ impl Function {
                                     .closure
                                     .get("__curried_arg_count")
                                     .and_then(|v| match v {
-                                        NixValue::Integer(n) => Some(*n as usize),
+                                        NixValue::Integer(n) => Some(n as usize),
                                         _ => None,
                                     })
                                     .unwrap_or(0);

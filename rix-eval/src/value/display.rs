@@ -34,14 +34,17 @@ impl fmt::Display for NixValue {
             NixValue::Boolean(b) => write!(f, "{}", b),
             NixValue::Null => write!(f, "null"),
             NixValue::AttributeSet(attrs) => {
-                // Sort keys for deterministic output (Nix attribute sets are ordered)
                 let mut sorted_keys: Vec<&String> = attrs.keys().collect();
                 sorted_keys.sort();
                 let entries: Vec<String> = sorted_keys
                     .iter()
                     .map(|k| format!("{} = {};", k, attrs[*k]))
                     .collect();
-                write!(f, "{{ {} }}", entries.join(" "))
+                if entries.is_empty() {
+                    write!(f, "{{ }}")
+                } else {
+                    write!(f, "{{ {} }}", entries.join(" "))
+                }
             }
             NixValue::List(items) => {
                 if items.is_empty() {

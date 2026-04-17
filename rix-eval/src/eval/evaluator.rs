@@ -41,7 +41,7 @@ impl Evaluator {
     pub fn new() -> Self {
         let mut evaluator = Self {
             builtins: HashMap::new(),
-            scope: HashMap::new(),
+            scope: VariableScope::new(),
             import_cache: Rc::new(RefCell::new(HashMap::new())),
             search_paths: HashMap::new(),
             source_map: Rc::new(RefCell::new(Files::new())),
@@ -580,6 +580,20 @@ impl Evaluator {
                 // Check if it's a variable in scope first (scope takes precedence)
                 if let Some(value) = scope.get(&text) {
                     return Ok(value.clone());
+                }
+
+                // Check 'with' blocks if identifier not found in lexical/recursive scope
+                // Innermost 'with' takes precedence, so we iterate the stack in reverse
+                for with_val in scope.withs().iter().rev() {
+                    let with_set = with_val.clone().force(self)?;
+                    if let NixValue::AttributeSet(attrs) = with_set {
+                        if let Some(v) = attrs.get(&text) {
+                            // Found in 'with' scope - return it
+                            // To maintain laziness, we return the value directly
+                            // (it might be a thunk that will be forced later)
+                            return Ok(v.clone());
+                        }
+                    }
                 }
 
                 // If not in scope, check for builtin values

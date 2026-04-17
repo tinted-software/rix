@@ -438,29 +438,29 @@ impl Evaluator {
         // a shared mutable scope. For now, we'll use a sequential approach that supports
         // forward references (later attributes can reference earlier ones).
         //
-        // To support full mutual references, we'd need to modify the thunk implementation
-        // to support a "recursive scope" that can be updated after thunk creation.
+        // To support full mutual references, we use a shared recursive scope
+        let shared_rec_map = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
         let mut rec_scope = self.scope.clone();
+        rec_scope.set_recursive(shared_rec_map.clone());
+        
         let mut attrs = HashMap::new();
 
-        // Add inherited attributes to the recursive scope first
+        // Add inherited attributes to the recursive scope and the result set
         for (key, value) in &inherit_attrs {
-            rec_scope.insert(key.clone(), value.clone());
+            shared_rec_map.lock().unwrap().insert(key.clone(), value.clone());
             attrs.insert(key.clone(), value.clone());
         }
 
-        // Create thunks sequentially, where each thunk's closure includes previous thunks
-        // This supports forward references: `rec { y = 1; x = y; }` works
-        // But backward references like `rec { x = y; y = 1; }` won't work with this approach
+        // Create thunks for all attributes
+        // Each thunk's closure includes the shared recursive map, allowing mutual references
         let file_id = self.current_file_id();
         for (key, value_expr) in &attr_entries {
-            // Create thunk with current scope (includes outer scope + previous attributes + inherited)
             let thunk = thunk::Thunk::new(value_expr, rec_scope.clone(), file_id);
-            let thunk_arc = Arc::new(thunk);
+            let thunk_value = NixValue::Thunk(Arc::new(thunk));
 
-            // Add to both attribute set and scope for next iteration
-            attrs.insert(key.clone(), NixValue::Thunk(thunk_arc.clone()));
-            rec_scope.insert(key.clone(), NixValue::Thunk(thunk_arc));
+            // Add to both the shared map (for mutual recursion) and result attribute set
+            shared_rec_map.lock().unwrap().insert(key.clone(), thunk_value.clone());
+            attrs.insert(key.clone(), thunk_value);
         }
 
         Ok(NixValue::AttributeSet(attrs))
