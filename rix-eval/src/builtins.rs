@@ -2142,6 +2142,32 @@ impl Builtin for LessThanBuiltin {
             (NixValue::Integer(x), NixValue::Float(y)) => (*x as f64) < *y,
             (NixValue::Float(x), NixValue::Integer(y)) => *x < (*y as f64),
             (NixValue::String(x), NixValue::String(y)) => x < y,
+            (NixValue::Path(x), NixValue::Path(y)) => x < y,
+            (NixValue::List(x), NixValue::List(y)) => {
+                let mut is_less = false;
+                for (xi, yi) in x.iter().zip(y.iter()) {
+                    match self.call(&[xi.clone(), yi.clone()]) {
+                        Ok(NixValue::Boolean(true)) => {
+                            is_less = true;
+                            break;
+                        }
+                        Ok(NixValue::Boolean(false)) => {
+                            if xi != yi {
+                                // Not equal and not less, so greater
+                                return Ok(NixValue::Boolean(false));
+                            }
+                            // Equal, continue to next element
+                        }
+                        Err(e) => return Err(e),
+                        _ => unreachable!(),
+                    }
+                }
+                if is_less {
+                    true
+                } else {
+                    x.len() < y.len()
+                }
+            }
             _ => {
                 return Err(Error::UnsupportedExpression {
                     reason: format!("lessThan: cannot compare {} and {}", a, b),

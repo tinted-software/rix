@@ -3093,8 +3093,8 @@ return Ok(accumulator);
                                                         }
                                                         NixValue::String(s) if s.starts_with("__builtin_func:") => {
                                                             let name = &s[15..];
-                                                            let a_forced = a.clone().force(self)?;
-                                                            let b_forced = b.clone().force(self)?;
+                                                            let a_forced = a.clone().deep_force(self)?;
+                                                            let b_forced = b.clone().deep_force(self)?;
                                                             let builtin = self.builtins.get(name).ok_or_else(|| {
                                                                 Error::UnsupportedExpression {
                                                                     reason: format!("unknown builtin: {}", name),
@@ -4711,8 +4711,8 @@ return Ok(accumulator);
                                     }
                                     NixValue::String(s) if s.starts_with("__builtin_func:") => {
                                         let name = &s[15..];
-                                        let a_forced = a.clone().force(self)?;
-                                        let b_forced = b.clone().force(self)?;
+                                        let a_forced = a.clone().deep_force(self)?;
+                                        let b_forced = b.clone().deep_force(self)?;
                                         let builtin = self.builtins.get(name).ok_or_else(|| {
                                             Error::UnsupportedExpression {
                                                 reason: format!("unknown builtin: {}", name),
@@ -4738,8 +4738,8 @@ return Ok(accumulator);
                                                     NixValue::String(s) if s.starts_with("__builtin_func:") => {
                                                         let name = &s[15..];
                                                         let builtin = self.builtins.get(name).unwrap();
-                                                        let a_forced = a.clone().force(self)?;
-                                                        let b_forced = b.clone().force(self)?;
+                                                        let a_forced = a.clone().deep_force(self)?;
+                                                        let b_forced = b.clone().deep_force(self)?;
                                                         builtin.call(&[b_forced, a_forced])?
                                                     }
                                                     _ => unreachable!(),
