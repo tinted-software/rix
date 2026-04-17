@@ -94,7 +94,11 @@ impl Evaluator {
                     }
                 } else {
                     // Fallback: use text representation, trimming quotes if present
-                    attr.syntax().text().to_string().trim_matches('"').to_string()
+                    attr.syntax()
+                        .text()
+                        .to_string()
+                        .trim_matches('"')
+                        .to_string()
                 };
 
                 // Look up the value in the inherit scope

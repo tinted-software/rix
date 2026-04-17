@@ -207,7 +207,10 @@ impl Evaluator {
                                 NixValue::List(l) => result.extend(l),
                                 _ => {
                                     return Err(Error::UnsupportedExpression {
-                                        reason: format!("concatLists: all elements must be lists, got {}", item_forced),
+                                        reason: format!(
+                                            "concatLists: all elements must be lists, got {}",
+                                            item_forced
+                                        ),
                                     });
                                 }
                             }
@@ -1241,7 +1244,8 @@ return Ok(NixValue::Boolean(true));
                                             reason: "concatLists: missing argument".to_string(),
                                         }
                                     })?;
-                                    let arg_value = self.evaluate_expr_with_scope_impl(&arg_expr, scope)?;
+                                    let arg_value =
+                                        self.evaluate_expr_with_scope_impl(&arg_expr, scope)?;
                                     let arg_forced = arg_value.clone().force(self)?;
                                     match arg_forced {
                                         NixValue::List(lists) => {
@@ -1252,7 +1256,10 @@ return Ok(NixValue::Boolean(true));
                                                     NixValue::List(l) => result.extend(l),
                                                     _ => {
                                                         return Err(Error::UnsupportedExpression {
-                                                            reason: format!("concatLists: all elements must be lists, got {}", item_forced),
+                                                            reason: format!(
+                                                                "concatLists: all elements must be lists, got {}",
+                                                                item_forced
+                                                            ),
                                                         });
                                                     }
                                                 }
@@ -1261,7 +1268,10 @@ return Ok(NixValue::Boolean(true));
                                         }
                                         _ => {
                                             return Err(Error::UnsupportedExpression {
-                                                reason: format!("concatLists expects a list, got {}", arg_forced),
+                                                reason: format!(
+                                                    "concatLists expects a list, got {}",
+                                                    arg_forced
+                                                ),
                                             });
                                         }
                                     }
@@ -3027,21 +3037,117 @@ return Ok(accumulator);
                                                 // So we need to check one more level up
 
                                                 return Err(Error::UnsupportedExpression {
-
-
-
-
-
-
-    reason: "foldl': requires three arguments (foldl' f init list) - needs nested Apply handling".to_string(),
-
-
-
-
-
-
-});
+                                                    reason: "foldl': requires three arguments (foldl' f init list) - needs nested Apply handling".to_string(),
+                                                });
                                             }
+                                        } else if attr.to_string() == "sort" {
+                                            // This is builtins.sort f list
+                                            let first_arg_expr = inner_apply
+                                                .argument()
+                                                .ok_or_else(|| Error::UnsupportedExpression {
+                                                    reason: "sort: missing first argument"
+                                                        .to_string(),
+                                                })?;
+                                            let second_arg_expr =
+                                                apply.argument().ok_or_else(|| {
+                                                    Error::UnsupportedExpression {
+                                                        reason: "sort: missing second argument"
+                                                            .to_string(),
+                                                    }
+                                                })?;
+                                            let func_value = self.evaluate_expr_with_scope_impl(
+                                                &first_arg_expr,
+                                                scope,
+                                            )?;
+                                            let list_value = self.evaluate_expr_with_scope_impl(
+                                                &second_arg_expr,
+                                                scope,
+                                            )?;
+                                            let list_forced = list_value.clone().force(self)?;
+                                            let mut list = match list_forced {
+                                                NixValue::List(l) => l,
+                                                _ => {
+                                                    return Err(Error::UnsupportedExpression {
+                                                        reason: format!(
+                                                            "sort: second argument must be a list, got {}",
+                                                            list_forced
+                                                        ),
+                                                    });
+                                                }
+                                            };
+
+                                            // We use a stable sort as per Nix documentation
+                                            let mut err = None;
+                                            list.sort_by(|a, b| {
+                                                if err.is_some() { return std::cmp::Ordering::Equal; }
+                                                let result = (|| -> Result<std::cmp::Ordering> {
+                                                    let res = match &func_value {
+                                                        NixValue::Function(f) => {
+                                                            let partial = f.apply(self, a.clone())?;
+                                                            match partial {
+                                                                NixValue::Function(f2) => f2.apply(self, b.clone())?,
+                                                                _ => return Err(Error::UnsupportedExpression {
+                                                                    reason: "sort: comparator must take 2 arguments".to_string(),
+                                                                }),
+                                                            }
+                                                        }
+                                                        NixValue::String(s) if s.starts_with("__builtin_func:") => {
+                                                            let name = &s[15..];
+                                                            let a_forced = a.clone().force(self)?;
+                                                            let b_forced = b.clone().force(self)?;
+                                                            let builtin = self.builtins.get(name).ok_or_else(|| {
+                                                                Error::UnsupportedExpression {
+                                                                    reason: format!("unknown builtin: {}", name),
+                                                                }
+                                                            })?;
+                                                            builtin.call(&[a_forced, b_forced])?
+                                                        }
+                                                        _ => return Err(Error::UnsupportedExpression {
+                                                            reason: format!("sort: first argument must be a function or builtin, got {}", func_value),
+                                                        }),
+                                                    };
+                                                    match res.force(self)? {
+                                                        NixValue::Boolean(true) => Ok(std::cmp::Ordering::Less),
+                                                        NixValue::Boolean(false) => {
+                                                            let res_rev = match &func_value {
+                                                                NixValue::Function(f) => {
+                                                                    let partial = f.apply(self, b.clone())?;
+                                                                    match partial {
+                                                                        NixValue::Function(f2) => f2.apply(self, a.clone())?,
+                                                                        _ => unreachable!(),
+                                                                    }
+                                                                }
+                                                    NixValue::String(s) if s.starts_with("__builtin_func:") => {
+                                                        let name = &s[15..];
+                                                        let builtin = self.builtins.get(name).unwrap();
+                                                        let a_forced = a.clone().force(self)?;
+                                                        let b_forced = b.clone().force(self)?;
+                                                        builtin.call(&[b_forced, a_forced])?
+                                                    }
+                                                                _ => unreachable!(),
+                                                            };
+                                                            match res_rev.force(self)? {
+                                                                NixValue::Boolean(true) => Ok(std::cmp::Ordering::Greater),
+                                                                _ => Ok(std::cmp::Ordering::Equal),
+                                                            }
+                                                        }
+                                                        _ => Err(Error::UnsupportedExpression {
+                                                            reason: "sort: comparator must return a boolean".to_string(),
+                                                        }),
+                                                    }
+                                                })();
+                                                match result {
+                                                    Ok(ord) => ord,
+                                                    Err(e) => {
+                                                        err = Some(e);
+                                                        std::cmp::Ordering::Equal
+                                                    }
+                                                }
+                                            });
+                                            if let Some(e) = err {
+                                                return Err(e);
+                                            }
+                                            return Ok(NixValue::List(list));
                                         } else if attr.to_string() == "genList" {
                                             // This is builtins.genList f n - extract both arguments
 
@@ -4559,6 +4665,108 @@ return Ok(accumulator);
                         }
 
                         return Ok(NixValue::Boolean(false));
+                    } else if builtin_name == "sort" {
+                        let first_arg_expr = inner_apply
+                            .argument()
+                            .ok_or_else(|| Error::UnsupportedExpression {
+                                reason: "sort: missing first argument".to_string(),
+                            })?;
+                        let second_arg_expr = apply.argument().ok_or_else(|| {
+                            Error::UnsupportedExpression {
+                                reason: "sort: missing second argument".to_string(),
+                            }
+                        })?;
+
+                        let func_value =
+                            self.evaluate_expr_with_scope_impl(&first_arg_expr, scope)?;
+                        let list_value =
+                            self.evaluate_expr_with_scope_impl(&second_arg_expr, scope)?;
+
+                        let list_forced = list_value.clone().force(self)?;
+                        let mut list = match list_forced {
+                            NixValue::List(l) => l,
+                            _ => {
+                                return Err(Error::UnsupportedExpression {
+                                    reason: format!(
+                                        "sort: second argument must be a list, got {}",
+                                        list_forced
+                                    ),
+                                });
+                            }
+                        };
+
+                        let mut err = None;
+                        list.sort_by(|a, b| {
+                            if err.is_some() { return std::cmp::Ordering::Equal; }
+                            let result = (|| -> Result<std::cmp::Ordering> {
+                                let res = match &func_value {
+                                    NixValue::Function(f) => {
+                                        let partial = f.apply(self, a.clone())?;
+                                        match partial {
+                                            NixValue::Function(f2) => f2.apply(self, b.clone())?,
+                                            _ => return Err(Error::UnsupportedExpression {
+                                                reason: "sort: comparator must take 2 arguments".to_string(),
+                                            }),
+                                        }
+                                    }
+                                    NixValue::String(s) if s.starts_with("__builtin_func:") => {
+                                        let name = &s[15..];
+                                        let a_forced = a.clone().force(self)?;
+                                        let b_forced = b.clone().force(self)?;
+                                        let builtin = self.builtins.get(name).ok_or_else(|| {
+                                            Error::UnsupportedExpression {
+                                                reason: format!("unknown builtin: {}", name),
+                                            }
+                                        })?;
+                                        builtin.call(&[a_forced, b_forced])?
+                                    }
+                                    _ => return Err(Error::UnsupportedExpression {
+                                        reason: format!("sort: first argument must be a function or builtin, got {}", func_value),
+                                    }),
+                                };
+                                match res.force(self)? {
+                                    NixValue::Boolean(true) => Ok(std::cmp::Ordering::Less),
+                                    NixValue::Boolean(false) => {
+                                                let res_rev = match &func_value {
+                                                    NixValue::Function(f) => {
+                                                        let partial = f.apply(self, b.clone())?;
+                                                        match partial {
+                                                            NixValue::Function(f2) => f2.apply(self, a.clone())?,
+                                                            _ => unreachable!(),
+                                                        }
+                                                    }
+                                                    NixValue::String(s) if s.starts_with("__builtin_func:") => {
+                                                        let name = &s[15..];
+                                                        let builtin = self.builtins.get(name).unwrap();
+                                                        let a_forced = a.clone().force(self)?;
+                                                        let b_forced = b.clone().force(self)?;
+                                                        builtin.call(&[b_forced, a_forced])?
+                                                    }
+                                                    _ => unreachable!(),
+                                                };
+                                        match res_rev.force(self)? {
+                                            NixValue::Boolean(true) => Ok(std::cmp::Ordering::Greater),
+                                            _ => Ok(std::cmp::Ordering::Equal),
+                                        }
+                                    }
+                                    _ => Err(Error::UnsupportedExpression {
+                                        reason: "sort: comparator must return a boolean".to_string(),
+                                    }),
+                                }
+                            })();
+                            match result {
+                                Ok(ord) => ord,
+                                Err(e) => {
+                                    err = Some(e);
+                                    std::cmp::Ordering::Equal
+                                }
+                            }
+                        });
+
+                        if let Some(e) = err {
+                            return Err(e);
+                        }
+                        return Ok(NixValue::List(list));
                     }
                 }
             }
@@ -4669,43 +4877,31 @@ return Ok(accumulator);
         match func_value_forced {
             NixValue::Function(func) => func.apply(self, arg_value),
 
-            NixValue::AttributeSet(mut attrs) => {
+            NixValue::AttributeSet(attrs) => {
                 // Check for __functor attribute (makes attribute sets callable)
-
-                if let Some(functor_value) = attrs.remove("__functor") {
+                if let Some(functor_value) = attrs.get("__functor") {
                     // Force the functor value if it's a thunk
-
-                    let functor = functor_value.force(self)?;
+                    let functor = functor_value.clone().force(self)?;
 
                     // The __functor should be a function
-
                     match functor {
                         NixValue::Function(func) => {
                             // Call the functor with the attribute set as the first argument,
-
                             // followed by the actual argument
-
                             // In Nix, `attrs arg` becomes `attrs.__functor attrs arg`
 
-                            // Since Function::apply only takes one argument, we use currying:
-
-                            // First apply the attribute set, then apply the result to the argument
-
-                            let attrs_value = NixValue::AttributeSet(attrs);
+                            // Since we need to pass the attribute set, and attrs is a reference
+                            // to the HashMap inside the NixValue::AttributeSet, we clone it.
+                            let attrs_value = NixValue::AttributeSet(attrs.clone());
 
                             let partial_result = func.apply(self, attrs_value)?;
 
                             // If the result is another function (currying), apply it to the argument
-
-                            // Otherwise, return the result as-is (the functor might have already handled everything)
-
                             match partial_result {
                                 NixValue::Function(next_func) => next_func.apply(self, arg_value),
-
                                 _ => Ok(partial_result),
                             }
                         }
-
                         _ => Err(Error::UnsupportedExpression {
                             reason: format!("__functor must be a function, got: {:?}", functor),
                         }),

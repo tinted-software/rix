@@ -119,6 +119,22 @@ impl Evaluator {
         self.register_builtin(Box::new(crate::builtins::ToJSONBuiltin));
         self.register_builtin(Box::new(crate::builtins::ListToAttrsBuiltin));
         self.register_builtin(Box::new(crate::builtins::SeqBuiltin));
+        self.register_builtin(Box::new(crate::builtins::SortBuiltin));
+        self.register_builtin(Box::new(crate::builtins::LessThanBuiltin));
+        self.register_builtin(Box::new(crate::builtins::IntersectAttrsBuiltin));
+        self.register_builtin(Box::new(crate::builtins::ElemBuiltin));
+        self.register_builtin(Box::new(crate::builtins::FromJSONBuiltin));
+        self.register_builtin(Box::new(crate::builtins::PathExistsBuiltin));
+        self.register_builtin(Box::new(crate::builtins::ReadFileBuiltin));
+        self.register_builtin(Box::new(crate::builtins::RemoveAttrsBuiltin));
+        self.register_builtin(Box::new(crate::builtins::ToPathBuiltin));
+        self.register_builtin(Box::new(crate::builtins::MapAttrsBuiltin));
+        self.register_builtin(Box::new(crate::builtins::ReadDirBuiltin));
+        self.register_builtin(Box::new(crate::builtins::ReadFileTypeBuiltin));
+        self.register_builtin(Box::new(crate::builtins::PartitionBuiltin));
+        self.register_builtin(Box::new(crate::builtins::HashStringBuiltin));
+        self.register_builtin(Box::new(crate::builtins::GroupByBuiltin));
+        self.register_builtin(Box::new(crate::builtins::HasContextBuiltin));
     }
 
     /// Get a builtin function by name
@@ -580,7 +596,7 @@ impl Evaluator {
                             // Store a marker that we can detect in evaluate_select
                             builtins_attrs.insert(
                                 name.clone(),
-                                NixValue::String(format!("__builtin:{}", name)),
+                                NixValue::String(format!("__builtin_func:{}", name)),
                             );
                         }
                         // Add builtins.builtins pointing to itself (recursive reference)
