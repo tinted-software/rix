@@ -206,14 +206,16 @@ impl Evaluator {
 
                 match arg_value {
                     NixValue::Path(path) => return self.import_file(&path),
-
                     NixValue::StorePath(path_str) => {
                         return self.import_file(Path::new(&path_str));
                     }
-
+                    NixValue::String(path_str) => {
+                        // Allow importing from a string path
+                        return self.import_file(Path::new(&path_str));
+                    }
                     _ => {
                         return Err(Error::UnsupportedExpression {
-                            reason: format!("import expects a path, got {}", arg_value),
+                            reason: format!("import expects a path or string, got {}", arg_value),
                         });
                     }
                 }

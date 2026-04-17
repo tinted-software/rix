@@ -31,25 +31,8 @@ impl Evaluator {
         let mut var_names = Vec::new();
 
         // First pass: Handle inherit statements in let expressions
-        // Look for Inherit nodes in the syntax tree, but only in the bindings section (before the body)
-        // We need to find the AttrSet that contains the bindings and search within it
-        // LetIn has a bindings() method that returns an AttrSet, but if that doesn't exist,
-        // we need to search the syntax tree more carefully
-        // Try to find the AttrSet node that contains the bindings
-        let mut found_inherits = Vec::new();
-        for descendant in syntax.descendants() {
-            // Check if this is an AttrSet (the bindings section)
-            if let Some(attr_set) = rix_parser::ast::AttrSet::cast(descendant.clone()) {
-                // Check if this AttrSet is the bindings (it should be a direct child of LetIn)
-                // Look for Inherit nodes within this AttrSet
-                for entry in attr_set.entries() {
-                    let entry_syntax = entry.syntax();
-                    if let Some(inherit_node) = Inherit::cast(entry_syntax.clone()) {
-                        found_inherits.push(inherit_node);
-                    }
-                }
-            }
-        }
+        // They are direct children of the LetIn node.
+        let found_inherits = let_in.inherits();
 
         // Process all found inherit statements
         for inherit_node in found_inherits {
@@ -64,6 +47,8 @@ impl Evaluator {
                 // Get the expression from the InheritFrom node
                 if let Some(from_expr) = inherit_from_node.expr() {
                     // Evaluate the from expression to get an attribute set
+                    // In a let expression, the from expression can see other bindings (it's recursive)
+                    // so we use new_scope which will hold all bindings.
                     let from_value = self.evaluate_expr_with_scope(&from_expr, &new_scope)?;
                     match from_value {
                         NixValue::AttributeSet(from_attrs) => {
@@ -82,11 +67,11 @@ impl Evaluator {
                         }
                     }
                 } else {
-                    // No expression in InheritFrom - inherit from current scope (the scope passed in, not new_scope!)
+                    // No expression in InheritFrom - inherit from current scope (passed-in scope)
                     scope.clone()
                 }
             } else {
-                // Inherit from the current scope (the scope passed in, not new_scope!)
+                // Inherit from the current scope (passed-in scope)
                 scope.clone()
             };
 
@@ -95,38 +80,25 @@ impl Evaluator {
                 // Get the attribute name (can be identifier or string literal)
                 let key = if let Some(ident) = rix_parser::ast::Ident::cast(attr.syntax().clone()) {
                     ident.to_string()
-                } else {
-                    // Try to get the text representation and handle string literals
-                    let attr_text = attr.syntax().text().to_string();
-                    // Check if it's a string literal (starts and ends with quotes)
-                    if attr_text.starts_with('"')
-                        && attr_text.ends_with('"')
-                        && attr_text.len() >= 2
-                    {
-                        // String literal - strip quotes
-                        attr_text[1..attr_text.len() - 1].to_string()
-                    } else if let Some(string) = rix_parser::ast::Str::cast(attr.syntax().clone()) {
-                        // String expression - evaluate it to get the string value
-                        let str_value = self.evaluate_string(&string, &new_scope)?;
-                        match str_value {
-                            NixValue::String(s) => s,
-                            _ => {
-                                return Err(Error::UnsupportedExpression {
-                                    reason: "inherit: string expression must evaluate to a string"
-                                        .to_string(),
-                                });
-                            }
+                } else if let Some(string) = rix_parser::ast::Str::cast(attr.syntax().clone()) {
+                    // String expression - evaluate it to get the string value
+                    let str_value = self.evaluate_string(&string, &new_scope)?;
+                    match str_value {
+                        NixValue::String(s) => s,
+                        _ => {
+                            return Err(Error::UnsupportedExpression {
+                                reason: "inherit: string expression must evaluate to a string"
+                                    .to_string(),
+                            });
                         }
-                    } else {
-                        // Fallback: use text representation, trimming quotes if present
-                        attr_text.trim_matches('"').to_string()
                     }
+                } else {
+                    // Fallback: use text representation, trimming quotes if present
+                    attr.syntax().text().to_string().trim_matches('"').to_string()
                 };
 
                 // Look up the value in the inherit scope
                 if let Some(value) = inherit_scope.get(&key) {
-                    // Create a thunk for the inherited value (lazy evaluation)
-                    // The value might already be a thunk, so we can just clone it
                     new_scope.insert(key.clone(), value.clone());
                     if !var_names.contains(&key) {
                         var_names.push(key);
@@ -161,13 +133,20 @@ impl Evaluator {
             // Collect all attribute names from the path
             let mut attr_names = Vec::new();
             for attr in attrpath.attrs() {
-                let attr_str = attr.to_string();
-                // Check if it's a string literal (starts and ends with quotes)
-                if attr_str.starts_with('"') && attr_str.ends_with('"') && attr_str.len() >= 2 {
-                    // Strip quotes for string literal attribute names
-                    attr_names.push(attr_str[1..attr_str.len() - 1].to_string());
+                if let Some(ident) = rix_parser::ast::Ident::cast(attr.syntax().clone()) {
+                    attr_names.push(ident.to_string());
+                } else if let Some(string) = rix_parser::ast::Str::cast(attr.syntax().clone()) {
+                    let str_value = self.evaluate_string(&string, &new_scope)?;
+                    match str_value {
+                        NixValue::String(s) => attr_names.push(s),
+                        _ => {
+                            return Err(Error::UnsupportedExpression {
+                                reason: "let binding variable name must be a string".to_string(),
+                            });
+                        }
+                    }
                 } else {
-                    attr_names.push(attr_str);
+                    attr_names.push(attr.to_string().trim_matches('"').to_string());
                 }
             }
 
@@ -390,14 +369,18 @@ impl Evaluator {
             let var_name = attrpath
                 .attrs()
                 .next()
-                .map(|attr| {
-                    let attr_str = attr.to_string();
-                    // Check if it's a string literal (starts and ends with quotes)
-                    if attr_str.starts_with('"') && attr_str.ends_with('"') && attr_str.len() >= 2 {
-                        // Strip quotes for string literal attribute names
-                        attr_str[1..attr_str.len() - 1].to_string()
+                .and_then(|attr| {
+                    if let Some(ident) = rix_parser::ast::Ident::cast(attr.syntax().clone()) {
+                        Some(ident.to_string())
+                    } else if let Some(string) = rix_parser::ast::Str::cast(attr.syntax().clone()) {
+                        // For legacy let, we use the original scope for string names if they don't have interpolation
+                        // but evaluating them in new_scope is safer if they might reference things.
+                        match self.evaluate_string(&string, &new_scope) {
+                            Ok(NixValue::String(s)) => Some(s),
+                            _ => None,
+                        }
                     } else {
-                        attr_str
+                        Some(attr.to_string().trim_matches('"').to_string())
                     }
                 })
                 .ok_or_else(|| Error::UnsupportedExpression {

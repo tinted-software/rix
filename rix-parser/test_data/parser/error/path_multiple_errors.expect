@@ -51,8 +51,8 @@ NODE_ROOT@0..141
       NODE_APPLY@128..138
         NODE_ERROR@128..133
           TOKEN_ERROR@128..133 "/foo/"
-        NODE_PATH_HOME@133..138
-          TOKEN_PATH_HOME@133..138 "~/bar"
+        NODE_PATH@133..138
+          TOKEN_PATH@133..138 "~/bar"
       TOKEN_SEMICOLON@138..139 ";"
     TOKEN_WHITESPACE@139..140 "\n"
     TOKEN_R_BRACE@140..141 "}"

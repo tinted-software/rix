@@ -37,10 +37,15 @@ fn get_nixpkgs_path() -> Option<String> {
     if output.status.success() {
         str::from_utf8(&output.stdout)
             .ok()
-            .map(|s| s.trim().to_string())
+            .map(|s| s.trim().replace('\\', "/"))
     } else {
         None
     }
+}
+
+/// Helper to normalize a path for Nix expressions
+fn normalize_path(path: &str) -> String {
+    format!("\"{}\"", path.replace('\\', "/"))
 }
 
 /// Helper to evaluate with nix-eval and capture errors
@@ -134,7 +139,7 @@ mod basic_imports {
             evaluator.add_search_path("nixpkgs", std::path::PathBuf::from(nixpkgs_path.clone()));
 
             // Import default.nix directly
-            let expr = format!("import {}/default.nix", nixpkgs_path);
+            let expr = format!("import {}/default.nix", normalize_path(&nixpkgs_path));
             let result = evaluator.evaluate(&expr).map_err(|e| format!("{:?}", e));
 
             match result {
@@ -170,7 +175,7 @@ mod basic_imports {
             evaluator.add_search_path("nixpkgs", std::path::PathBuf::from(nixpkgs_path.clone()));
 
             // Import lib/minfeatures.nix directly
-            let expr = format!("import {}/lib/minfeatures.nix", nixpkgs_path);
+            let expr = format!("import {}/lib/minfeatures.nix", normalize_path(&nixpkgs_path));
             let result = evaluator.evaluate(&expr).map_err(|e| format!("{:?}", e));
 
             match result {
@@ -204,7 +209,7 @@ mod basic_imports {
             evaluator.add_search_path("nixpkgs", std::path::PathBuf::from(nixpkgs_path.clone()));
 
             // Import pkgs/top-level/impure.nix directly
-            let expr = format!("import {}/pkgs/top-level/impure.nix", nixpkgs_path);
+            let expr = format!("import {}/pkgs/top-level/impure.nix", normalize_path(&nixpkgs_path));
             let result = evaluator.evaluate(&expr).map_err(|e| format!("{:?}", e));
 
             match result {
@@ -238,7 +243,7 @@ mod basic_imports {
             evaluator.add_search_path("nixpkgs", std::path::PathBuf::from(nixpkgs_path.clone()));
 
             // Import pkgs/top-level/impure-overlays.nix directly
-            let expr = format!("import {}/pkgs/top-level/impure-overlays.nix", nixpkgs_path);
+            let expr = format!("import {}/pkgs/top-level/impure-overlays.nix", normalize_path(&nixpkgs_path));
             let result = evaluator.evaluate(&expr).map_err(|e| format!("{:?}", e));
 
             match result {
@@ -286,9 +291,8 @@ mod basic_imports {
             std::fs::write(&test_file, "import flake").unwrap();
 
             // Set current_file context and try to import
-            // Actually, we need to test this through the evaluator's import mechanism
             // Let's test importing the test file which has "import flake"
-            let expr = format!("import {}", test_file.display());
+            let expr = format!("import {}", normalize_path(&test_file.to_string_lossy()));
             let result = evaluator.evaluate(&expr).map_err(|e| format!("{:?}", e));
 
             match result {
@@ -330,7 +334,7 @@ mod basic_imports {
             let lib_path = format!("{}/lib", nixpkgs_path);
             if std::path::Path::new(&lib_path).is_dir() {
                 // Try importing the lib directory (should resolve to lib/default.nix)
-                let expr = format!("import {}/lib", nixpkgs_path);
+                let expr = format!("import {}/lib", normalize_path(&nixpkgs_path));
                 let result = evaluator.evaluate(&expr).map_err(|e| format!("{:?}", e));
 
                 match result {
@@ -396,7 +400,7 @@ mod basic_imports {
     #[test]
     fn test_nixpkgs_import_with_path() {
         if let Some(nixpkgs_path) = get_nixpkgs_path() {
-            let expr = format!("import {} {{}}", nixpkgs_path);
+            let expr = format!("import {} {{}}", normalize_path(&nixpkgs_path));
             let result = eval_with_nix_eval(&expr);
 
             match result {
@@ -430,7 +434,7 @@ mod basic_imports {
             evaluator.add_search_path("nixpkgs", std::path::PathBuf::from(nixpkgs_path.clone()));
 
             // Import impure.nix (returns a function) and call it with {}
-            let expr = format!("(import {}/pkgs/top-level/impure.nix) {{}}", nixpkgs_path);
+            let expr = format!("(import {}/pkgs/top-level/impure.nix) {{}}", normalize_path(&nixpkgs_path));
             let result = evaluator.evaluate(&expr).map_err(|e| format!("{:?}", e));
 
             match result {
@@ -466,7 +470,7 @@ mod basic_imports {
             evaluator.add_search_path("nixpkgs", std::path::PathBuf::from(nixpkgs_path.clone()));
 
             // Import pkgs/top-level/default.nix directly
-            let expr = format!("import {}/pkgs/top-level/default.nix", nixpkgs_path);
+            let expr = format!("import {}/pkgs/top-level/default.nix", normalize_path(&nixpkgs_path));
             let result = evaluator.evaluate(&expr).map_err(|e| format!("{:?}", e));
 
             match result {
@@ -505,7 +509,7 @@ mod basic_imports {
             // Based on impure.nix, it needs: config, overlays, localSystem
             let expr = format!(
                 "(import {}/pkgs/top-level/default.nix) {{ config = {{}}; overlays = []; localSystem = {{ system = \"x86_64-linux\"; }}; }}",
-                nixpkgs_path
+                normalize_path(&nixpkgs_path)
             );
             let result = evaluator.evaluate(&expr).map_err(|e| format!("{:?}", e));
 
@@ -545,7 +549,7 @@ mod basic_imports {
 
             // Step 1: Import default.nix
             println!("Step 1: Importing default.nix...");
-            let expr1 = format!("import {}/default.nix", nixpkgs_path);
+            let expr1 = format!("import {}/default.nix", normalize_path(&nixpkgs_path));
             let result1 = evaluator.evaluate(&expr1).map_err(|e| format!("{:?}", e));
             match result1 {
                 Ok(_) => println!("  ✓ default.nix imported successfully"),
@@ -556,7 +560,7 @@ mod basic_imports {
 
             // Step 2: Import pkgs/top-level/impure.nix
             println!("Step 2: Importing pkgs/top-level/impure.nix...");
-            let expr2 = format!("import {}/pkgs/top-level/impure.nix", nixpkgs_path);
+            let expr2 = format!("import {}/pkgs/top-level/impure.nix", normalize_path(&nixpkgs_path));
             let result2 = evaluator.evaluate(&expr2).map_err(|e| format!("{:?}", e));
             match result2 {
                 Ok(_) => println!("  ✓ impure.nix imported successfully"),
@@ -567,7 +571,7 @@ mod basic_imports {
 
             // Step 3: Call impure.nix with {}
             println!("Step 3: Calling impure.nix function with {{}}...");
-            let expr3 = format!("(import {}/pkgs/top-level/impure.nix) {{}}", nixpkgs_path);
+            let expr3 = format!("(import {}/pkgs/top-level/impure.nix) {{}}", normalize_path(&nixpkgs_path));
             let result3 = evaluator.evaluate(&expr3).map_err(|e| format!("{:?}", e));
             match result3 {
                 Ok(_) => println!("  ✓ impure.nix called successfully"),
@@ -578,7 +582,7 @@ mod basic_imports {
 
             // Step 4: Import pkgs/top-level/default.nix
             println!("Step 4: Importing pkgs/top-level/default.nix...");
-            let expr4 = format!("import {}/pkgs/top-level/default.nix", nixpkgs_path);
+            let expr4 = format!("import {}/pkgs/top-level/default.nix", normalize_path(&nixpkgs_path));
             let result4 = evaluator.evaluate(&expr4).map_err(|e| format!("{:?}", e));
             match result4 {
                 Ok(_) => println!("  ✓ pkgs/top-level/default.nix imported successfully"),
@@ -635,7 +639,7 @@ mod basic_imports {
             evaluator.add_search_path("nixpkgs", std::path::PathBuf::from(nixpkgs_path.clone()));
 
             // This is exactly what "import <nixpkgs> {}" does
-            let expr = format!("(import {}/default.nix) {{}}", nixpkgs_path);
+            let expr = format!("(import {}/default.nix) {{}}", normalize_path(&nixpkgs_path));
             let result = evaluator.evaluate(&expr).map_err(|e| format!("{:?}", e));
 
             match result {
@@ -683,7 +687,7 @@ mod basic_imports {
 
         // Test with our evaluator
         let mut evaluator = Evaluator::new();
-        let expr = format!("import {}", test_file.display());
+        let expr = format!("import {}", normalize_path(&test_file.to_string_lossy()));
         let result = evaluator.evaluate(&expr).map_err(|e| format!("{:?}", e));
 
         match result {

@@ -434,7 +434,11 @@ impl Evaluator {
         let expr = root.expr().ok_or(Error::NoExpression)?;
 
         // Evaluate the expression
-        self.evaluate_expr(&expr)
+        let result = self.evaluate_expr(&expr)?;
+
+        // Fully force the result so that we return a concrete value
+        // instead of a thunk (lazy evaluation).
+        result.deep_force(self)
     }
 
     /// Evaluate a Nix expression from a file
@@ -497,12 +501,13 @@ impl Evaluator {
         self.push_context(Some(file_id), self.scope.clone());
 
         // Evaluate the expression
-        let result = self.evaluate_expr(&expr);
+        let result = self.evaluate_expr(&expr)?;
 
         // Pop context (restore previous context)
         self.pop_context();
 
-        result
+        // Fully force the result
+        result.deep_force(self)
     }
 
     /// Evaluate a parsed Nix expression AST node with a specific scope

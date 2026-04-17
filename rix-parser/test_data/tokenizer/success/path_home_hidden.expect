@@ -1,1 +1,1 @@
-TOKEN_PATH_HOME, "~/.config/nixpkgs/config.nix"
+TOKEN_PATH, "~/.config/nixpkgs/config.nix"

@@ -58,7 +58,8 @@ impl fmt::Display for NixValue {
                 write!(f, "<function {}: {}>", func.parameter(), func.body_text())
             }
             NixValue::Path(path) => {
-                write!(f, "{}", path.display())
+                let path_str = path.to_string_lossy().replace('\\', "/");
+                write!(f, "{}", path_str)
             }
             NixValue::StorePath(path) => {
                 write!(f, "{}", path)

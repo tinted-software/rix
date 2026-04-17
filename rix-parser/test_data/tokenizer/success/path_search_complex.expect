@@ -1,1 +1,1 @@
-TOKEN_PATH_SEARCH, "<nixpkgs/pkgs/development/tools/rust/cargo>"
+TOKEN_PATH, "<nixpkgs/pkgs/development/tools/rust/cargo>"

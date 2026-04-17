@@ -97,7 +97,7 @@ pub enum SyntaxKind {
 use SyntaxKind::*;
 
 /// Maximum valid discriminant value for SyntaxKind
-pub(crate) const SYNTAX_KIND_MAX: u16 = NODE_WITH as u16;
+pub(crate) const SYNTAX_KIND_MAX: u16 = NODE_PATH as u16;
 
 /// Error returned when parsing a string into a `SyntaxKind` fails.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,6 +203,7 @@ impl std::str::FromStr for SyntaxKind {
             "NODE_STRING" => Ok(NODE_STRING),
             "NODE_UNARY_OP" => Ok(NODE_UNARY_OP),
             "NODE_WITH" => Ok(NODE_WITH),
+            "NODE_PATH" => Ok(NODE_PATH),
             _ => Err(ParseSyntaxKindError),
         }
     }
