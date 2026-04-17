@@ -1354,16 +1354,22 @@ mod full_evaluation {
             evaluator.add_search_path("nixpkgs", std::path::PathBuf::from(path));
         } else {
             // Try alternative: use NIX_PATH environment variable
+            let mut found = false;
             if let Ok(nix_path) = std::env::var("NIX_PATH") {
                 // NIX_PATH format: "nixpkgs=/path/to/nixpkgs:other=/path"
                 for entry in nix_path.split(':') {
                     if let Some((name, path)) = entry.split_once('=') {
                         if name == "nixpkgs" {
                             evaluator.add_search_path("nixpkgs", std::path::PathBuf::from(path));
+                            found = true;
                             break;
                         }
                     }
                 }
+            }
+            if !found {
+                println!("Skipping: nixpkgs search path not found and NIX_PATH not set");
+                return;
             }
         }
 
@@ -1474,15 +1480,21 @@ mod full_evaluation {
             evaluator.add_search_path("nixpkgs", std::path::PathBuf::from(path));
         } else {
             // Try alternative: use NIX_PATH environment variable
+            let mut found = false;
             if let Ok(nix_path) = std::env::var("NIX_PATH") {
                 for entry in nix_path.split(':') {
                     if let Some((name, path)) = entry.split_once('=') {
                         if name == "nixpkgs" {
                             evaluator.add_search_path("nixpkgs", std::path::PathBuf::from(path));
+                            found = true;
                             break;
                         }
                     }
                 }
+            }
+            if !found {
+                println!("Skipping: nixpkgs search path not found and NIX_PATH not set");
+                return;
             }
         }
 

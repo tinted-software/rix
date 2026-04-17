@@ -2692,29 +2692,25 @@ impl Builtin for CompareVersionsBuiltin {
         fn split_version(s: &str) -> Vec<String> {
             let mut components = Vec::new();
             let mut current = String::new();
-            let mut in_number = false;
 
             for ch in s.chars() {
                 if ch.is_ascii_digit() {
-                    if !in_number && !current.is_empty() {
+                    if !current.is_empty() && !current.chars().next().unwrap().is_ascii_digit() {
                         components.push(current.clone());
                         current.clear();
                     }
-                    in_number = true;
                     current.push(ch);
-                } else if ch == '.' || ch == '-' {
+                } else if ch.is_ascii_alphabetic() {
+                    if !current.is_empty() && current.chars().next().unwrap().is_ascii_digit() {
+                        components.push(current.clone());
+                        current.clear();
+                    }
+                    current.push(ch);
+                } else {
                     if !current.is_empty() {
                         components.push(current.clone());
                         current.clear();
                     }
-                    in_number = false;
-                } else {
-                    if in_number && !current.is_empty() {
-                        components.push(current.clone());
-                        current.clear();
-                    }
-                    in_number = false;
-                    current.push(ch);
                 }
             }
             if !current.is_empty() {
@@ -2732,14 +2728,23 @@ impl Builtin for CompareVersionsBuiltin {
             let a_part = a_parts.get(i).map(|s| s.as_str()).unwrap_or("");
             let b_part = b_parts.get(i).map(|s| s.as_str()).unwrap_or("");
 
-            // Check for "pre" suffix
-            let a_has_pre = a_part.contains("pre");
-            let b_has_pre = b_part.contains("pre");
+            if a_part == b_part {
+                continue;
+            }
 
-            if a_has_pre && !b_has_pre {
+            // Special case for "pre" - it's smaller than anything else (including empty)
+            if a_part == "pre" {
                 return Ok(NixValue::Integer(-1));
             }
-            if !a_has_pre && b_has_pre {
+            if b_part == "pre" {
+                return Ok(NixValue::Integer(1));
+            }
+
+            // Handle empty parts (padding)
+            if a_part.is_empty() {
+                return Ok(NixValue::Integer(-1));
+            }
+            if b_part.is_empty() {
                 return Ok(NixValue::Integer(1));
             }
 
@@ -2755,16 +2760,9 @@ impl Builtin for CompareVersionsBuiltin {
                         return Ok(NixValue::Integer(1));
                     }
                 }
-                (Some(_), None) | (None, Some(_)) => {
-                    // One is a number, one is a string - compare as strings
-                    if a_part < b_part {
-                        return Ok(NixValue::Integer(-1));
-                    } else if a_part > b_part {
-                        return Ok(NixValue::Integer(1));
-                    }
-                }
+                (Some(_), None) => return Ok(NixValue::Integer(1)), // Number > String
+                (None, Some(_)) => return Ok(NixValue::Integer(-1)), // String < Number
                 (None, None) => {
-                    // Both are strings - compare lexicographically
                     if a_part < b_part {
                         return Ok(NixValue::Integer(-1));
                     } else if a_part > b_part {

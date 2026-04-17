@@ -189,6 +189,39 @@ impl Evaluator {
                 }
             }
 
+            // Handle concatLists directly
+            if builtin_name == "concatLists" {
+                let arg_expr = apply
+                    .argument()
+                    .ok_or_else(|| Error::UnsupportedExpression {
+                        reason: "concatLists missing argument".to_string(),
+                    })?;
+                let arg_value = self.evaluate_expr_with_scope_impl(&arg_expr, scope)?;
+                let arg_forced = arg_value.clone().force(self)?;
+                match arg_forced {
+                    NixValue::List(lists) => {
+                        let mut result = Vec::new();
+                        for item in lists {
+                            let item_forced = item.clone().force(self)?;
+                            match item_forced {
+                                NixValue::List(l) => result.extend(l),
+                                _ => {
+                                    return Err(Error::UnsupportedExpression {
+                                        reason: format!("concatLists: all elements must be lists, got {}", item_forced),
+                                    });
+                                }
+                            }
+                        }
+                        return Ok(NixValue::List(result));
+                    }
+                    _ => {
+                        return Err(Error::UnsupportedExpression {
+                            reason: format!("concatLists expects a list, got {}", arg_forced),
+                        });
+                    }
+                }
+            }
+
             // Handle import builtin specially since it needs evaluator context
 
             if builtin_name == "import" {
@@ -1198,6 +1231,37 @@ return Ok(NixValue::Boolean(true));
                                                     "attrValues expects an attribute set, got {}",
                                                     arg_forced
                                                 ),
+                                            });
+                                        }
+                                    }
+                                } else if attr.to_string() == "concatLists" {
+                                    // This is builtins.concatLists list
+                                    let arg_expr = apply.argument().ok_or_else(|| {
+                                        Error::UnsupportedExpression {
+                                            reason: "concatLists: missing argument".to_string(),
+                                        }
+                                    })?;
+                                    let arg_value = self.evaluate_expr_with_scope_impl(&arg_expr, scope)?;
+                                    let arg_forced = arg_value.clone().force(self)?;
+                                    match arg_forced {
+                                        NixValue::List(lists) => {
+                                            let mut result = Vec::new();
+                                            for item in lists {
+                                                let item_forced = item.clone().force(self)?;
+                                                match item_forced {
+                                                    NixValue::List(l) => result.extend(l),
+                                                    _ => {
+                                                        return Err(Error::UnsupportedExpression {
+                                                            reason: format!("concatLists: all elements must be lists, got {}", item_forced),
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                            return Ok(NixValue::List(result));
+                                        }
+                                        _ => {
+                                            return Err(Error::UnsupportedExpression {
+                                                reason: format!("concatLists expects a list, got {}", arg_forced),
                                             });
                                         }
                                     }
