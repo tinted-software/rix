@@ -252,7 +252,7 @@ mod tests {
     fn test_thunk_creation() {
         // This test is a placeholder - we'll need actual Expr nodes from rnix
         // For now, we'll test the structure
-        let _scope: VariableScope = HashMap::new();
+        let _scope: VariableScope = VariableScope::new();
         // In a real test, we'd parse an expression and create a thunk
         // let expr = parse("42").unwrap();
         // let thunk = Thunk::new(&expr, scope);
@@ -261,7 +261,7 @@ mod tests {
 
     #[test]
     fn test_thunk_state() {
-        let _scope: VariableScope = HashMap::new();
+        let _scope: VariableScope = VariableScope::new();
         // Placeholder test - will be expanded when we have actual Expr nodes
     }
 }

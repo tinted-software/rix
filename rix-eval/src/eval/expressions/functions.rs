@@ -1382,8 +1382,10 @@ return Ok(NixValue::Boolean(true));
 
                                                 // Call builtin with accumulator and element
 
-                                                accumulator =
-                                                    builtin.call_with_evaluator(&[accumulator, element_forced], self)?;
+                                                accumulator = builtin.call_with_evaluator(
+                                                    &[accumulator, element_forced],
+                                                    self,
+                                                )?;
                                             }
 
                                             return Ok(accumulator);
@@ -1704,10 +1706,13 @@ return Ok(NixValue::Boolean(true));
                                                                         // Call builtin with accumulator and element
 
                                                                         accumulator = builtin
-                                                                            .call_with_evaluator(&[
-                                                                                accumulator,
-                                                                                element_forced,
-                                                                            ], self)?;
+                                                                            .call_with_evaluator(
+                                                                                &[
+                                                                                    accumulator,
+                                                                                    element_forced,
+                                                                                ],
+                                                                                self,
+                                                                            )?;
                                                                     }
 
                                                                     return Ok(accumulator);
@@ -4666,16 +4671,18 @@ return Ok(accumulator);
 
                         return Ok(NixValue::Boolean(false));
                     } else if builtin_name == "sort" {
-                        let first_arg_expr = inner_apply
-                            .argument()
-                            .ok_or_else(|| Error::UnsupportedExpression {
-                                reason: "sort: missing first argument".to_string(),
-                            })?;
-                        let second_arg_expr = apply.argument().ok_or_else(|| {
-                            Error::UnsupportedExpression {
-                                reason: "sort: missing second argument".to_string(),
-                            }
-                        })?;
+                        let first_arg_expr =
+                            inner_apply
+                                .argument()
+                                .ok_or_else(|| Error::UnsupportedExpression {
+                                    reason: "sort: missing first argument".to_string(),
+                                })?;
+                        let second_arg_expr =
+                            apply
+                                .argument()
+                                .ok_or_else(|| Error::UnsupportedExpression {
+                                    reason: "sort: missing second argument".to_string(),
+                                })?;
 
                         let func_value =
                             self.evaluate_expr_with_scope_impl(&first_arg_expr, scope)?;
@@ -4776,9 +4783,12 @@ return Ok(accumulator);
 
         let func_value_raw = self.evaluate_expr_with_scope_impl(&func_expr, scope)?;
 
+        // Force the function value to check for builtin markers
+        let func_value_forced = func_value_raw.clone().force(self)?;
+
         // Check if this is a builtin function marker (from builtins.<name>)
 
-        let func_value = if let NixValue::String(ref s) = func_value_raw {
+        let func_value = if let NixValue::String(ref s) = func_value_forced {
             if s.starts_with("__builtin_func:") {
                 let builtin_name = &s[15..]; // Skip "__builtin_func:"
 

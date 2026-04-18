@@ -362,10 +362,11 @@ impl Builtin for TypeOfBuiltin {
                 reason: format!("typeOf takes 1 argument, got {}", args.len()),
             });
         }
-        let type_name = match args[0] {
+        let type_name = match &args[0] {
             NixValue::Integer(_) => "int",
             NixValue::Float(_) => "float",
             NixValue::Boolean(_) => "bool",
+            NixValue::String(s) if s.starts_with("__builtin_func:") => "lambda",
             NixValue::String(_) => "string",
             NixValue::Null => "null",
             NixValue::List(_) => "list",
@@ -810,11 +811,17 @@ impl Builtin for DerivationBuiltin {
     }
     fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
         Err(Error::UnsupportedExpression {
-            reason: "derivation requires evaluator context and must be called via call_with_evaluator".to_string(),
+            reason:
+                "derivation requires evaluator context and must be called via call_with_evaluator"
+                    .to_string(),
         })
     }
 
-    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &crate::eval::Evaluator) -> Result<NixValue> {
+    fn call_with_evaluator(
+        &self,
+        args: &[NixValue],
+        evaluator: &crate::eval::Evaluator,
+    ) -> Result<NixValue> {
         if args.len() != 1 {
             return Err(Error::UnsupportedExpression {
                 reason: format!("derivation takes 1 argument, got {}", args.len()),
@@ -825,12 +832,13 @@ impl Builtin for DerivationBuiltin {
         match &args[0].clone().force(evaluator)? {
             NixValue::AttributeSet(attrs) => {
                 // Extract required attributes
-                let name_val = attrs
-                    .get("name")
-                    .cloned()
-                    .ok_or_else(|| Error::UnsupportedExpression {
-                        reason: "derivation: missing or invalid 'name' attribute".to_string(),
-                    })?;
+                let name_val =
+                    attrs
+                        .get("name")
+                        .cloned()
+                        .ok_or_else(|| Error::UnsupportedExpression {
+                            reason: "derivation: missing or invalid 'name' attribute".to_string(),
+                        })?;
                 let name = name_val.force(evaluator)?.as_string()?;
 
                 let system = match attrs.get("system").cloned() {
@@ -838,12 +846,14 @@ impl Builtin for DerivationBuiltin {
                     None => "unknown".to_string(),
                 };
 
-                let builder_val = attrs
-                    .get("builder")
-                    .cloned()
-                    .ok_or_else(|| Error::UnsupportedExpression {
-                        reason: "derivation: missing or invalid 'builder' attribute".to_string(),
-                    })?;
+                let builder_val =
+                    attrs
+                        .get("builder")
+                        .cloned()
+                        .ok_or_else(|| Error::UnsupportedExpression {
+                            reason: "derivation: missing or invalid 'builder' attribute"
+                                .to_string(),
+                        })?;
                 let builder = builder_val.force(evaluator)?.to_string(); // Handles Path/String/etc.
 
                 // Extract optional attributes
@@ -937,22 +947,34 @@ impl Builtin for DerivationBuiltin {
                 // In a real implementation, we'd compute the actual store path here.
                 // For now, we'll return an attribute set that looks like a derivation.
                 let mut result_attrs = HashMap::new();
-                
+
                 // Copy all original values into the result set
                 for (k, v) in result_attrs_original {
                     result_attrs.insert(k, v);
                 }
-                
+
                 // Add required derivation attributes
                 result_attrs.insert("name".to_string(), NixValue::String(name));
                 result_attrs.insert("system".to_string(), NixValue::String(system));
                 result_attrs.insert("builder".to_string(), NixValue::String(builder));
-                result_attrs.insert("args".to_string(), NixValue::List(args.into_iter().map(NixValue::String).collect()));
-                result_attrs.insert("type".to_string(), NixValue::String("derivation".to_string()));
-                
+                result_attrs.insert(
+                    "args".to_string(),
+                    NixValue::List(args.into_iter().map(NixValue::String).collect()),
+                );
+                result_attrs.insert(
+                    "type".to_string(),
+                    NixValue::String("derivation".to_string()),
+                );
+
                 // Add dummy drvPath and outPath (in a real system these would be computed)
-                result_attrs.insert("drvPath".to_string(), NixValue::String("/nix/store/placeholder.drv".to_string()));
-                result_attrs.insert("outPath".to_string(), NixValue::String("/nix/store/placeholder".to_string()));
+                result_attrs.insert(
+                    "drvPath".to_string(),
+                    NixValue::String("/nix/store/placeholder.drv".to_string()),
+                );
+                result_attrs.insert(
+                    "outPath".to_string(),
+                    NixValue::String("/nix/store/placeholder".to_string()),
+                );
 
                 Ok(NixValue::AttributeSet(result_attrs))
             }
@@ -1220,16 +1242,15 @@ impl Builtin for MapBuiltin {
     }
 
     fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
-        println!("MapBuiltin::call_with_evaluator called with {} args", args.len());
         if args.len() != 2 {
             return Err(Error::UnsupportedExpression {
-                reason: format!("map takes 2 arguments, got {}", args.len()),
+                reason: format!("takes 2 arguments, got {}", args.len()),
             });
         }
 
         let func = &args[0];
         let list_val = args[1].clone().force(evaluator)?;
-        
+
         match list_val {
             NixValue::List(list) => {
                 let mut results = Vec::new();
@@ -1238,16 +1259,29 @@ impl Builtin for MapBuiltin {
                         NixValue::Function(f) => f.apply(evaluator, item)?,
                         NixValue::String(s) if s.starts_with("__builtin_func:") => {
                             let name = &s[15..];
-                            let builtin = evaluator.builtins.get(name).ok_or_else(|| Error::UnsupportedExpression { reason: format!("unknown builtin: {}", name) })?;
+                            let builtin = evaluator.builtins.get(name).ok_or_else(|| {
+                                Error::UnsupportedExpression {
+                                    reason: format!("unknown builtin: {}", name),
+                                }
+                            })?;
                             builtin.call_with_evaluator(&[item], evaluator)?
                         }
-                        _ => return Err(Error::UnsupportedExpression { reason: format!("map: first argument must be a function, got {}", func) }),
+                        _ => {
+                            return Err(Error::UnsupportedExpression {
+                                reason: format!(
+                                    "map: first argument must be a function, got {}",
+                                    func
+                                ),
+                            });
+                        }
                     };
                     results.push(res);
                 }
                 Ok(NixValue::List(results))
             }
-            _ => Err(Error::UnsupportedExpression { reason: format!("map: second argument must be a list, got {}", list_val) }),
+            _ => Err(Error::UnsupportedExpression {
+                reason: format!("map: second argument must be a list, got {}", list_val),
+            }),
         }
     }
 
@@ -1269,13 +1303,353 @@ impl Builtin for ConcatMapBuiltin {
     fn name(&self) -> &str {
         "concatMap"
     }
-
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
+        if args.len() != 2 {
+            return Err(Error::UnsupportedExpression {
+                reason: format!("concatMap takes 2 arguments, got {}", args.len()),
+            });
+        }
+        let func = &args[0];
+        let list_val = args[1].clone().force(evaluator)?;
+        match list_val {
+            NixValue::List(list) => {
+                let mut results = Vec::new();
+                for item in list {
+                    let res = match func {
+                        NixValue::Function(f) => f.apply(evaluator, item.clone())?,
+                        NixValue::String(s) if s.starts_with("__builtin_func:") => {
+                            let name = &s[15..];
+                            let builtin = evaluator.builtins.get(name).ok_or_else(|| {
+                                Error::UnsupportedExpression {
+                                    reason: format!("unknown builtin: {}", name),
+                                }
+                            })?;
+                            builtin.call_with_evaluator(&[item.clone()], evaluator)?
+                        }
+                        _ => {
+                            return Err(Error::UnsupportedExpression {
+                                reason: format!(
+                                    "concatMap: first argument must be a function, got {}",
+                                    func
+                                ),
+                            });
+                        }
+                    };
+                    let inner_list = res.force(evaluator)?;
+                    match inner_list {
+                        NixValue::List(items) => results.extend(items),
+                        _ => {
+                            return Err(Error::UnsupportedExpression {
+                                reason: format!(
+                                    "concatMap: function must return a list, got {}",
+                                    inner_list
+                                ),
+                            });
+                        }
+                    }
+                }
+                Ok(NixValue::List(results))
+            }
+            _ => Err(Error::UnsupportedExpression {
+                reason: format!(
+                    "concatMap: second argument must be a list, got {}",
+                    list_val
+                ),
+            }),
+        }
+    }
     fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
-        // This should never be called directly - concatMap is handled specially in evaluate_apply
-        // to call Nix functions for each element
         Err(Error::UnsupportedExpression {
-            reason: "concatMap requires evaluator context and must be handled specially"
-                .to_string(),
+            reason: "concatMap requires evaluator context".to_string(),
+        })
+    }
+}
+
+/// Filter builtin - filters a list using a predicate
+pub struct FilterBuiltin;
+impl Builtin for FilterBuiltin {
+    fn name(&self) -> &str {
+        "filter"
+    }
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
+        if args.len() != 2 {
+            return Err(Error::UnsupportedExpression {
+                reason: format!("filter takes 2 arguments, got {}", args.len()),
+            });
+        }
+        let func = &args[0];
+        let list_val = args[1].clone().force(evaluator)?;
+        match list_val {
+            NixValue::List(list) => {
+                let mut results = Vec::new();
+                for item in list {
+                    let res = match func {
+                        NixValue::Function(f) => f.apply(evaluator, item.clone())?,
+                        NixValue::String(s) if s.starts_with("__builtin_func:") => {
+                            let name = &s[15..];
+                            let builtin = evaluator.builtins.get(name).ok_or_else(|| {
+                                Error::UnsupportedExpression {
+                                    reason: format!("unknown builtin: {}", name),
+                                }
+                            })?;
+                            builtin.call_with_evaluator(&[item.clone()], evaluator)?
+                        }
+                        _ => {
+                            return Err(Error::UnsupportedExpression {
+                                reason: format!(
+                                    "filter: first argument must be a function, got {}",
+                                    func
+                                ),
+                            });
+                        }
+                    };
+                    match res.force(evaluator)? {
+                        NixValue::Boolean(true) => results.push(item),
+                        NixValue::Boolean(false) => {}
+                        val => {
+                            return Err(Error::UnsupportedExpression {
+                                reason: format!(
+                                    "filter: predicate must return a boolean, got {}",
+                                    val
+                                ),
+                            });
+                        }
+                    }
+                }
+                Ok(NixValue::List(results))
+            }
+            _ => Err(Error::UnsupportedExpression {
+                reason: format!("filter: second argument must be a list, got {}", list_val),
+            }),
+        }
+    }
+    fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
+        Err(Error::UnsupportedExpression {
+            reason: "filter requires evaluator context".to_string(),
+        })
+    }
+}
+
+/// All builtin - checks if all elements satisfy a predicate
+pub struct AllBuiltin;
+impl Builtin for AllBuiltin {
+    fn name(&self) -> &str {
+        "all"
+    }
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
+        if args.len() != 2 {
+            return Err(Error::UnsupportedExpression {
+                reason: format!("all takes 2 arguments, got {}", args.len()),
+            });
+        }
+        let func = &args[0];
+        let list_val = args[1].clone().force(evaluator)?;
+        match list_val {
+            NixValue::List(list) => {
+                for item in list {
+                    let res = match func {
+                        NixValue::Function(f) => f.apply(evaluator, item.clone())?,
+                        NixValue::String(s) if s.starts_with("__builtin_func:") => {
+                            let name = &s[15..];
+                            let builtin = evaluator.builtins.get(name).ok_or_else(|| {
+                                Error::UnsupportedExpression {
+                                    reason: format!("unknown builtin: {}", name),
+                                }
+                            })?;
+                            builtin.call_with_evaluator(&[item.clone()], evaluator)?
+                        }
+                        _ => {
+                            return Err(Error::UnsupportedExpression {
+                                reason: format!(
+                                    "all: first argument must be a function, got {}",
+                                    func
+                                ),
+                            });
+                        }
+                    };
+                    match res.force(evaluator)? {
+                        NixValue::Boolean(true) => {}
+                        NixValue::Boolean(false) => return Ok(NixValue::Boolean(false)),
+                        val => {
+                            return Err(Error::UnsupportedExpression {
+                                reason: format!(
+                                    "all: predicate must return a boolean, got {}",
+                                    val
+                                ),
+                            });
+                        }
+                    }
+                }
+                Ok(NixValue::Boolean(true))
+            }
+            _ => Err(Error::UnsupportedExpression {
+                reason: format!("all: second argument must be a list, got {}", list_val),
+            }),
+        }
+    }
+    fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
+        Err(Error::UnsupportedExpression {
+            reason: "all requires evaluator context".to_string(),
+        })
+    }
+}
+
+/// Any builtin - checks if any element satisfies a predicate
+pub struct AnyBuiltin;
+impl Builtin for AnyBuiltin {
+    fn name(&self) -> &str {
+        "any"
+    }
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
+        if args.len() != 2 {
+            return Err(Error::UnsupportedExpression {
+                reason: format!("any takes 2 arguments, got {}", args.len()),
+            });
+        }
+        let func = &args[0];
+        let list_val = args[1].clone().force(evaluator)?;
+        match list_val {
+            NixValue::List(list) => {
+                for item in list {
+                    let res = match func {
+                        NixValue::Function(f) => f.apply(evaluator, item.clone())?,
+                        NixValue::String(s) if s.starts_with("__builtin_func:") => {
+                            let name = &s[15..];
+                            let builtin = evaluator.builtins.get(name).ok_or_else(|| {
+                                Error::UnsupportedExpression {
+                                    reason: format!("unknown builtin: {}", name),
+                                }
+                            })?;
+                            builtin.call_with_evaluator(&[item.clone()], evaluator)?
+                        }
+                        _ => {
+                            return Err(Error::UnsupportedExpression {
+                                reason: format!(
+                                    "any: first argument must be a function, got {}",
+                                    func
+                                ),
+                            });
+                        }
+                    };
+                    match res.force(evaluator)? {
+                        NixValue::Boolean(true) => return Ok(NixValue::Boolean(true)),
+                        NixValue::Boolean(false) => {}
+                        val => {
+                            return Err(Error::UnsupportedExpression {
+                                reason: format!(
+                                    "any: predicate must return a boolean, got {}",
+                                    val
+                                ),
+                            });
+                        }
+                    }
+                }
+                Ok(NixValue::Boolean(false))
+            }
+            _ => Err(Error::UnsupportedExpression {
+                reason: format!("any: second argument must be a list, got {}", list_val),
+            }),
+        }
+    }
+    fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
+        Err(Error::UnsupportedExpression {
+            reason: "any requires evaluator context".to_string(),
+        })
+    }
+}
+
+/// Sort builtin - sorts a list using a comparison function
+pub struct SortBuiltin;
+impl Builtin for SortBuiltin {
+    fn name(&self) -> &str {
+        "sort"
+    }
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
+        if args.len() != 2 {
+            return Err(Error::UnsupportedExpression {
+                reason: format!("sort takes 2 arguments, got {}", args.len()),
+            });
+        }
+        let func = args[0].clone();
+        let list_val = args[1].clone().force(evaluator)?;
+        match list_val {
+            NixValue::List(list) => {
+                let mut results = list.clone();
+                let mut err = None;
+                results.sort_by(|a, b| {
+                    if err.is_some() {
+                        return std::cmp::Ordering::Equal;
+                    }
+                    let res = (|| -> Result<std::cmp::Ordering> {
+                        let partial = match &func {
+                            NixValue::Function(f) => f.apply(evaluator, a.clone())?,
+                            NixValue::String(s) if s.starts_with("__builtin_func:") => {
+                                let name = &s[15..];
+                                let builtin = evaluator.builtins.get(name).ok_or_else(|| {
+                                    Error::UnsupportedExpression {
+                                        reason: format!("unknown builtin: {}", name),
+                                    }
+                                })?;
+                                builtin.call_with_evaluator(&[a.clone()], evaluator)?
+                            }
+                            _ => {
+                                return Err(Error::UnsupportedExpression {
+                                    reason: format!(
+                                        "sort: first argument must be a function, got {}",
+                                        func
+                                    ),
+                                });
+                            }
+                        };
+                        let res = match partial {
+                            NixValue::Function(next) => next.apply(evaluator, b.clone())?,
+                            NixValue::String(s) if s.starts_with("__builtin_func:") => {
+                                let name = &s[15..];
+                                let builtin = evaluator.builtins.get(name).ok_or_else(|| {
+                                    Error::UnsupportedExpression {
+                                        reason: format!("unknown builtin: {}", name),
+                                    }
+                                })?;
+                                builtin.call_with_evaluator(&[b.clone()], evaluator)?
+                            }
+                            _ => {
+                                return Err(Error::UnsupportedExpression {
+                                    reason: format!("sort: comparator must take 2 arguments"),
+                                });
+                            }
+                        };
+                        match res.force(evaluator)? {
+                            NixValue::Boolean(true) => Ok(std::cmp::Ordering::Less),
+                            NixValue::Boolean(false) => Ok(std::cmp::Ordering::Greater),
+                            val => Err(Error::UnsupportedExpression {
+                                reason: format!(
+                                    "sort: predicate must return a boolean, got {}",
+                                    val
+                                ),
+                            }),
+                        }
+                    })();
+                    match res {
+                        Ok(ord) => ord,
+                        Err(e) => {
+                            err = Some(e);
+                            std::cmp::Ordering::Equal
+                        }
+                    }
+                });
+                if let Some(e) = err {
+                    return Err(e);
+                }
+                Ok(NixValue::List(results))
+            }
+            _ => Err(Error::UnsupportedExpression {
+                reason: format!("sort: second argument must be a list, got {}", list_val),
+            }),
+        }
+    }
+    fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
+        Err(Error::UnsupportedExpression {
+            reason: "sort requires evaluator context".to_string(),
         })
     }
 }
@@ -1742,87 +2116,6 @@ impl Builtin for ToJSONBuiltin {
     }
 }
 
-/// Filter builtin - filters a list using a predicate function
-///
-/// `builtins.filter f list` returns a new list containing only elements for which `f` returns true.
-/// This requires evaluator context to call Nix functions, so it's handled specially in evaluate_apply.
-pub struct FilterBuiltin;
-
-impl Builtin for FilterBuiltin {
-    fn name(&self) -> &str {
-        "filter"
-    }
-
-    fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
-        // This should never be called directly - filter is handled specially in evaluate_apply
-        // to call Nix functions for each element
-        Err(Error::UnsupportedExpression {
-            reason: "filter requires evaluator context and must be handled specially".to_string(),
-        })
-    }
-}
-
-/// All builtin - checks if all elements of a list satisfy a predicate
-///
-/// `builtins.all f list` returns true if `f` returns true for all elements in `list`.
-/// This requires evaluator context to call Nix functions, so it's handled specially in evaluate_apply.
-pub struct AllBuiltin;
-
-impl Builtin for AllBuiltin {
-    fn name(&self) -> &str {
-        "all"
-    }
-
-    fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
-        // This should never be called directly - all is handled specially in evaluate_apply
-        // to call Nix functions for each element
-        Err(Error::UnsupportedExpression {
-            reason: "all requires evaluator context and must be handled specially".to_string(),
-        })
-    }
-}
-
-/// Any builtin - checks if any element of a list satisfies a predicate
-///
-/// `builtins.any f list` returns true if `f` returns true for any element in `list`.
-/// This requires evaluator context to call Nix functions, so it's handled specially in evaluate_apply.
-pub struct AnyBuiltin;
-
-impl Builtin for AnyBuiltin {
-    fn name(&self) -> &str {
-        "any"
-    }
-
-    fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
-        // This should never be called directly - any is handled specially in evaluate_apply
-        // to call Nix functions for each element
-        Err(Error::UnsupportedExpression {
-            reason: "any requires evaluator context and must be handled specially".to_string(),
-        })
-    }
-}
-
-/// Sort builtin - sorts a list using a comparison function
-///
-/// `builtins.sort f list` sorts `list` using comparison function `f` that takes two arguments
-/// and returns true if the first should come before the second.
-/// This requires evaluator context to call Nix functions, so it's handled specially in evaluate_apply.
-pub struct SortBuiltin;
-
-impl Builtin for SortBuiltin {
-    fn name(&self) -> &str {
-        "sort"
-    }
-
-    fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
-        // This should never be called directly - sort is handled specially in evaluate_apply
-        // to call Nix functions for comparison
-        Err(Error::UnsupportedExpression {
-            reason: "sort requires evaluator context and must be handled specially".to_string(),
-        })
-    }
-}
-
 /// FromJSON builtin - parses a JSON string to a Nix value
 pub struct FromJSONBuiltin;
 
@@ -2205,11 +2498,7 @@ impl Builtin for LessThanBuiltin {
                         _ => unreachable!(),
                     }
                 }
-                if is_less {
-                    true
-                } else {
-                    x.len() < y.len()
-                }
+                if is_less { true } else { x.len() < y.len() }
             }
             _ => {
                 return Err(Error::UnsupportedExpression {

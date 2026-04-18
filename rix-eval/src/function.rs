@@ -325,7 +325,10 @@ impl Function {
                         if let Some(builtin) = evaluator.get_builtin(builtin_name) {
                             let accumulator_forced = accumulator.clone().force(evaluator)?;
                             let element_forced = element.clone().force(evaluator)?;
-                            accumulator = builtin.call_with_evaluator(&[accumulator_forced, element_forced], evaluator)?;
+                            accumulator = builtin.call_with_evaluator(
+                                &[accumulator_forced, element_forced],
+                                evaluator,
+                            )?;
                         } else {
                             return Err(Error::UnsupportedExpression {
                                 reason: format!("foldl': builtin '{}' not found", builtin_name),
@@ -482,8 +485,7 @@ mod tests {
     fn test_function_creation() {
         // This test is a placeholder - we'll need actual Expr nodes from rnix
         // For now, we'll test the structure
-        use std::collections::HashMap;
-        let _scope: VariableScope = HashMap::new();
+        let _scope = VariableScope::new();
         // In a real test, we'd parse an expression and create a function
         // let body_expr = parse("x + 1").unwrap();
         // let func = Function::new("x", &body_expr, scope);

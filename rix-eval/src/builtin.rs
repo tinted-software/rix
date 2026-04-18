@@ -49,7 +49,11 @@ pub trait Builtin: Send + Sync {
     ///
     /// This is an optional method that builtins can implement if they need access
     /// to the evaluator (e.g. to force nested thunks).
-    fn call_with_evaluator(&self, args: &[NixValue], _evaluator: &crate::eval::Evaluator) -> Result<NixValue> {
+    fn call_with_evaluator(
+        &self,
+        args: &[NixValue],
+        _evaluator: &crate::eval::Evaluator,
+    ) -> Result<NixValue> {
         self.call(args)
     }
 }

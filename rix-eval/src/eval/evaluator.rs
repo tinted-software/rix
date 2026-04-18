@@ -733,10 +733,19 @@ impl crate::value::NixValue {
             let from_set = from.force(evaluator)?;
             match from_set {
                 NixValue::AttributeSet(m) => {
-                    current = m.get(&attr).cloned().ok_or_else(|| Error::UnsupportedExpression { reason: format!("inherit(from): {} not found", attr) })?;
+                    current =
+                        m.get(&attr)
+                            .cloned()
+                            .ok_or_else(|| Error::UnsupportedExpression {
+                                reason: format!("inherit(from): {} not found", attr),
+                            })?;
                     current = current.force(evaluator)?;
                 }
-                _ => return Err(Error::UnsupportedExpression { reason: "inherit from non-attrset".to_string() }),
+                _ => {
+                    return Err(Error::UnsupportedExpression {
+                        reason: "inherit from non-attrset".to_string(),
+                    });
+                }
             }
         }
         Ok(current)
@@ -837,7 +846,9 @@ impl crate::value::NixValue {
                 // but we include them to satisfy the compiler's exhaustiveness check.
                 // We don't use 'self' here because it was moved into the force() call above.
                 // 'value' is actually already forced, so this is just to satisfy the compiler.
-                unreachable!("Thunk/Deferred should have been converted to concrete value by force()")
+                unreachable!(
+                    "Thunk/Deferred should have been converted to concrete value by force()"
+                )
             }
             other => Ok(other),
         }

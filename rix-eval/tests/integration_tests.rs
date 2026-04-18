@@ -3,7 +3,7 @@
 //! These tests verify the end-to-end behavior of the evaluator,
 //! testing complete evaluation workflows rather than individual functions.
 
-use nix_eval::{Evaluator, NixValue};
+use nix_eval::{Evaluator, NixValue, VariableScope};
 use std::collections::HashMap;
 
 #[test]
@@ -295,7 +295,7 @@ fn test_json_serialization() {
 #[test]
 fn test_variable_scope_resolution() {
     let mut evaluator = Evaluator::new();
-    let mut scope = HashMap::new();
+    let mut scope = VariableScope::new();
     scope.insert("x".to_string(), NixValue::Integer(42));
     scope.insert("y".to_string(), NixValue::String("hello".to_string()));
     evaluator.set_scope(scope);

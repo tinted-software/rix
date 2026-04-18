@@ -40,10 +40,17 @@ impl fmt::Display for NixValue {
                     .iter()
                     .map(|k| {
                         let needs_quoting = k.is_empty()
-                            || k.chars().next().map(|c| !c.is_ascii_alphabetic() && c != '_').unwrap_or(true)
-                            || k.chars().any(|c| !c.is_ascii_alphanumeric() && c != '_' && c != '-' && c != '\'');
-                        
-                        let keywords = ["if", "then", "else", "assert", "with", "let", "in", "rec", "inherit"];
+                            || k.chars()
+                                .next()
+                                .map(|c| !c.is_ascii_alphabetic() && c != '_')
+                                .unwrap_or(true)
+                            || k.chars().any(|c| {
+                                !c.is_ascii_alphanumeric() && c != '_' && c != '-' && c != '\''
+                            });
+
+                        let keywords = [
+                            "if", "then", "else", "assert", "with", "let", "in", "rec", "inherit",
+                        ];
                         let needs_quoting = needs_quoting || keywords.contains(&k.as_str());
 
                         let key_disp = if needs_quoting {
@@ -111,8 +118,12 @@ impl PartialEq for NixValue {
             (NixValue::Path(a), NixValue::Path(b)) => a == b,
             (NixValue::StorePath(a), NixValue::StorePath(b)) => a == b,
             (NixValue::Derivation(a), NixValue::Derivation(b)) => Arc::ptr_eq(a, b),
-            (NixValue::DeferredLookup(a_name, _), NixValue::DeferredLookup(b_name, _)) => a_name == b_name,
-            (NixValue::DeferredInherit(_, a_name), NixValue::DeferredInherit(_, b_name)) => a_name == b_name,
+            (NixValue::DeferredLookup(a_name, _), NixValue::DeferredLookup(b_name, _)) => {
+                a_name == b_name
+            }
+            (NixValue::DeferredInherit(_, a_name), NixValue::DeferredInherit(_, b_name)) => {
+                a_name == b_name
+            }
             _ => false,
         }
     }
