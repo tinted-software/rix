@@ -5,6 +5,7 @@
 
 use crate::builtin::Builtin;
 use crate::error::{Error, Result};
+use crate::eval::Evaluator;
 use crate::value::NixValue;
 use regex::Regex;
 use std::collections::HashMap;
@@ -807,7 +808,13 @@ impl Builtin for DerivationBuiltin {
     fn name(&self) -> &str {
         "derivation"
     }
-    fn call(&self, args: &[NixValue]) -> Result<NixValue> {
+    fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
+        Err(Error::UnsupportedExpression {
+            reason: "derivation requires evaluator context and must be called via call_with_evaluator".to_string(),
+        })
+    }
+
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &crate::eval::Evaluator) -> Result<NixValue> {
         if args.len() != 1 {
             return Err(Error::UnsupportedExpression {
                 reason: format!("derivation takes 1 argument, got {}", args.len()),
@@ -815,61 +822,46 @@ impl Builtin for DerivationBuiltin {
         }
 
         // The argument should be an attribute set with derivation attributes
-        match &args[0] {
+        match &args[0].clone().force(evaluator)? {
             NixValue::AttributeSet(attrs) => {
                 // Extract required attributes
-                let name = attrs
+                let name_val = attrs
                     .get("name")
-                    .and_then(|v| match v {
-                        NixValue::String(s) => Some(s.clone()),
-                        _ => None,
-                    })
+                    .cloned()
                     .ok_or_else(|| Error::UnsupportedExpression {
                         reason: "derivation: missing or invalid 'name' attribute".to_string(),
                     })?;
+                let name = name_val.force(evaluator)?.as_string()?;
 
-                let system = attrs
-                    .get("system")
-                    .and_then(|v| match v {
-                        NixValue::String(s) => Some(s.clone()),
-                        _ => None,
-                    })
-                    .unwrap_or_else(|| "unknown".to_string());
+                let system = match attrs.get("system").cloned() {
+                    Some(v) => v.force(evaluator)?.as_string()?,
+                    None => "unknown".to_string(),
+                };
 
-                let builder = attrs
+                let builder_val = attrs
                     .get("builder")
-                    .and_then(|v| match v {
-                        NixValue::String(s) => Some(s.clone()),
-                        NixValue::Path(p) => Some(p.display().to_string()),
-                        NixValue::StorePath(p) => Some(p.clone()),
-                        _ => None,
-                    })
+                    .cloned()
                     .ok_or_else(|| Error::UnsupportedExpression {
                         reason: "derivation: missing or invalid 'builder' attribute".to_string(),
                     })?;
+                let builder = builder_val.force(evaluator)?.to_string(); // Handles Path/String/etc.
 
                 // Extract optional attributes
-                let args = attrs
-                    .get("args")
-                    .and_then(|v| match v {
+                let args_val = attrs.get("args").cloned();
+                let args = if let Some(av) = args_val {
+                    match av.force(evaluator)? {
                         NixValue::List(l) => {
-                            let str_args: Result<Vec<String>> = l
-                                .iter()
-                                .map(|item| match item {
-                                    NixValue::String(s) => Ok(s.clone()),
-                                    _ => Err(Error::UnsupportedExpression {
-                                        reason: format!(
-                                            "derivation args must be strings, got {}",
-                                            item
-                                        ),
-                                    }),
-                                })
-                                .collect();
-                            Some(str_args.ok()?)
+                            let mut str_args = Vec::new();
+                            for item in l {
+                                str_args.push(item.force(evaluator)?.as_string()?);
+                            }
+                            str_args
                         }
-                        _ => None,
-                    })
-                    .unwrap_or_default();
+                        _ => Vec::new(),
+                    }
+                } else {
+                    Vec::new()
+                };
 
                 // Extract environment variables
                 let mut env = HashMap::new();
@@ -891,7 +883,9 @@ impl Builtin for DerivationBuiltin {
                     outputs.insert("out".to_string(), String::new());
                 }
 
-                for (key, value) in attrs {
+                let mut result_attrs_original = HashMap::new();
+                for (key, value) in attrs.iter() {
+                    let key = key.to_string();
                     if key != "name"
                         && key != "system"
                         && key != "builder"
@@ -899,9 +893,11 @@ impl Builtin for DerivationBuiltin {
                         && key != "outputs"
                     {
                         // All other attributes become environment variables
-                        let env_value = match value {
-                            NixValue::String(s) => s.clone(),
-                            _ => format!("{}", value),
+                        let forced_v = value.clone().force(evaluator)?;
+                        result_attrs_original.insert(key.clone(), forced_v.clone());
+                        let env_value = match forced_v {
+                            NixValue::String(s) => s,
+                            _ => forced_v.to_string(),
                         };
                         env.insert(key.clone(), env_value);
                     }
@@ -910,10 +906,10 @@ impl Builtin for DerivationBuiltin {
                 // Create derivation structure
                 let mut derivation = crate::Derivation {
                     name: name.clone(),
-                    system,
-                    builder,
-                    args,
-                    env,
+                    system: system.clone(),
+                    builder: builder.clone(),
+                    args: args.clone(),
+                    env: env.clone(),
                     input_derivations: HashMap::new(),
                     input_sources: Vec::new(),
                     outputs: HashMap::new(), // Will be populated after computing store path
@@ -938,14 +934,27 @@ impl Builtin for DerivationBuiltin {
                         .insert(output_name.clone(), String::new());
                 }
 
-                // Set $out environment variable to the default output path
-                if let Some(out_path) = derivation.outputs.get("out") {
-                    if !out_path.is_empty() {
-                        derivation.env.insert("out".to_string(), out_path.clone());
-                    }
+                // In a real implementation, we'd compute the actual store path here.
+                // For now, we'll return an attribute set that looks like a derivation.
+                let mut result_attrs = HashMap::new();
+                
+                // Copy all original values into the result set
+                for (k, v) in result_attrs_original {
+                    result_attrs.insert(k, v);
                 }
+                
+                // Add required derivation attributes
+                result_attrs.insert("name".to_string(), NixValue::String(name));
+                result_attrs.insert("system".to_string(), NixValue::String(system));
+                result_attrs.insert("builder".to_string(), NixValue::String(builder));
+                result_attrs.insert("args".to_string(), NixValue::List(args.into_iter().map(NixValue::String).collect()));
+                result_attrs.insert("type".to_string(), NixValue::String("derivation".to_string()));
+                
+                // Add dummy drvPath and outPath (in a real system these would be computed)
+                result_attrs.insert("drvPath".to_string(), NixValue::String("/nix/store/placeholder.drv".to_string()));
+                result_attrs.insert("outPath".to_string(), NixValue::String("/nix/store/placeholder".to_string()));
 
-                Ok(NixValue::Derivation(Arc::new(derivation)))
+                Ok(NixValue::AttributeSet(result_attrs))
             }
             _ => Err(Error::UnsupportedExpression {
                 reason: format!("derivation expects an attribute set, got {}", args[0]),
@@ -1210,11 +1219,41 @@ impl Builtin for MapBuiltin {
         "map"
     }
 
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
+        println!("MapBuiltin::call_with_evaluator called with {} args", args.len());
+        if args.len() != 2 {
+            return Err(Error::UnsupportedExpression {
+                reason: format!("map takes 2 arguments, got {}", args.len()),
+            });
+        }
+
+        let func = &args[0];
+        let list_val = args[1].clone().force(evaluator)?;
+        
+        match list_val {
+            NixValue::List(list) => {
+                let mut results = Vec::new();
+                for item in list {
+                    let res = match func {
+                        NixValue::Function(f) => f.apply(evaluator, item)?,
+                        NixValue::String(s) if s.starts_with("__builtin_func:") => {
+                            let name = &s[15..];
+                            let builtin = evaluator.builtins.get(name).ok_or_else(|| Error::UnsupportedExpression { reason: format!("unknown builtin: {}", name) })?;
+                            builtin.call_with_evaluator(&[item], evaluator)?
+                        }
+                        _ => return Err(Error::UnsupportedExpression { reason: format!("map: first argument must be a function, got {}", func) }),
+                    };
+                    results.push(res);
+                }
+                Ok(NixValue::List(results))
+            }
+            _ => Err(Error::UnsupportedExpression { reason: format!("map: second argument must be a list, got {}", list_val) }),
+        }
+    }
+
     fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
-        // This should never be called directly - map is handled specially in evaluate_apply
-        // to call Nix functions for each element
         Err(Error::UnsupportedExpression {
-            reason: "map requires evaluator context and must be handled specially".to_string(),
+            reason: "map requires evaluator context".to_string(),
         })
     }
 }

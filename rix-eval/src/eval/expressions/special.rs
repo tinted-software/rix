@@ -212,7 +212,9 @@ impl Evaluator {
         let namespace_expr = with_expr.namespace().ok_or_else(|| Error::UnsupportedExpression { reason: "with missing namespace".to_string() })?;
         let body_expr = with_expr.body().ok_or_else(|| Error::UnsupportedExpression { reason: "with missing body".to_string() })?;
 
-        let namespace_val = self.evaluate_expr_with_scope(&namespace_expr, scope)?;
+        let file_id = self.current_file_id();
+        let namespace_thunk = std::sync::Arc::new(crate::Thunk::new(&namespace_expr, scope.clone(), file_id));
+        let namespace_val = NixValue::Thunk(namespace_thunk);
         
         let mut new_scope = scope.clone();
         new_scope.push_with(namespace_val);

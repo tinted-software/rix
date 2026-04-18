@@ -325,7 +325,7 @@ impl Function {
                         if let Some(builtin) = evaluator.get_builtin(builtin_name) {
                             let accumulator_forced = accumulator.clone().force(evaluator)?;
                             let element_forced = element.clone().force(evaluator)?;
-                            accumulator = builtin.call(&[accumulator_forced, element_forced])?;
+                            accumulator = builtin.call_with_evaluator(&[accumulator_forced, element_forced], evaluator)?;
                         } else {
                             return Err(Error::UnsupportedExpression {
                                 reason: format!("foldl': builtin '{}' not found", builtin_name),
@@ -398,8 +398,7 @@ impl Function {
                                 args.push(arg_forced);
                             }
 
-                            // Try calling the builtin with all collected arguments
-                            match builtin.call(&args) {
+                            match builtin.call_with_evaluator(&args, evaluator) {
                                 Ok(result) => return Ok(result),
                                 Err(Error::UnsupportedExpression { reason })
                                     if reason.contains("takes") && reason.contains("arguments") =>
@@ -435,24 +434,6 @@ impl Function {
                             }
                         }
                     }
-                }
-            }
-            let builtin_name = &self.body_text[23..]; // Skip "__curried_builtin_call:"
-            if let Some(first_arg) = self.closure.get("__curried_first_arg") {
-                // This is a curried builtin - call it with both arguments
-                // Force both arguments before calling the builtin
-                let first_arg_forced = first_arg.clone().force(evaluator)?;
-                let argument_forced = argument.clone().force(evaluator)?;
-
-                // Get the builtin from the evaluator
-                if let Some(builtin) = evaluator.get_builtin(builtin_name) {
-                    // get_builtin returns &dyn Builtin, but call takes &[NixValue]
-                    // We need to call it directly
-                    return builtin.call(&[first_arg_forced, argument_forced]);
-                } else {
-                    return Err(Error::UnsupportedExpression {
-                        reason: format!("builtin '{}' not found", builtin_name),
-                    });
                 }
             }
         }

@@ -667,6 +667,10 @@ impl Evaluator {
                     );
                 }
                 builtins_attrs.insert(
+                    "currentSystem".to_string(),
+                    NixValue::String("x86_64-linux".to_string()),
+                );
+                builtins_attrs.insert(
                     "builtins".to_string(),
                     NixValue::String("__builtins_self__".to_string()),
                 );

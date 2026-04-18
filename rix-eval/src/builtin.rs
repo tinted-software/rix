@@ -44,4 +44,12 @@ pub trait Builtin: Send + Sync {
     ///
     /// The result of the builtin function call, or an error
     fn call(&self, args: &[NixValue]) -> Result<NixValue>;
+
+    /// Calls the builtin function with the given arguments and evaluator context
+    ///
+    /// This is an optional method that builtins can implement if they need access
+    /// to the evaluator (e.g. to force nested thunks).
+    fn call_with_evaluator(&self, args: &[NixValue], _evaluator: &crate::eval::Evaluator) -> Result<NixValue> {
+        self.call(args)
+    }
 }

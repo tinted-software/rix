@@ -323,7 +323,7 @@ impl Evaluator {
                 // No __toString found, fall through to normal toString builtin
 
                 if let Some(builtin) = self.builtins.get(&builtin_name) {
-                    return builtin.call(&[arg_value]);
+                    return builtin.call_with_evaluator(&[arg_value], self);
                 }
             }
 
@@ -518,7 +518,7 @@ impl Evaluator {
 
             // Handle foldl' specially when called directly (not via builtins.foldl')
 
-            // foldl' requires evaluator context, so it can't be called via builtin.call()
+            // foldl' requires evaluator context, so it can't be called via builtin.call_with_evaluator()
 
             if builtin_name == "foldl'" {
 
@@ -557,7 +557,7 @@ impl Evaluator {
 
                     // Note: Builtins take a slice of arguments, so we wrap in a slice
 
-                    return builtin.call(&[arg_value]);
+                    return builtin.call_with_evaluator(&[arg_value], self);
                 }
             }
         }
@@ -790,7 +790,7 @@ impl Evaluator {
                                     if let Some(builtin) = self.builtins.get("toJSON") {
                                         let arg_forced = arg_value.clone().force(self)?;
 
-                                        return builtin.call(&[arg_forced]);
+                                        return builtin.call_with_evaluator(&[arg_forced], self);
                                     }
                                 } else if attr.to_string() == "listToAttrs" {
                                     // This is builtins.listToAttrs list - handle specially to force thunks in list elements
@@ -1383,7 +1383,7 @@ return Ok(NixValue::Boolean(true));
                                                 // Call builtin with accumulator and element
 
                                                 accumulator =
-                                                    builtin.call(&[accumulator, element_forced])?;
+                                                    builtin.call_with_evaluator(&[accumulator, element_forced], self)?;
                                             }
 
                                             return Ok(accumulator);
@@ -1704,10 +1704,10 @@ return Ok(NixValue::Boolean(true));
                                                                         // Call builtin with accumulator and element
 
                                                                         accumulator = builtin
-                                                                            .call(&[
+                                                                            .call_with_evaluator(&[
                                                                                 accumulator,
                                                                                 element_forced,
-                                                                            ])?;
+                                                                            ], self)?;
                                                                     }
 
                                                                     return Ok(accumulator);
@@ -2462,7 +2462,7 @@ let element_forced = element.clone().force(self)?;
 
 
 
-accumulator = builtin.call(&[accumulator, element_forced])?;
+accumulator = builtin.call_with_evaluator(&[accumulator, element_forced], self)?;
 
 
 
@@ -3100,7 +3100,7 @@ return Ok(accumulator);
                                                                     reason: format!("unknown builtin: {}", name),
                                                                 }
                                                             })?;
-                                                            builtin.call(&[a_forced, b_forced])?
+                                                            builtin.call_with_evaluator(&[a_forced, b_forced], self)?
                                                         }
                                                         _ => return Err(Error::UnsupportedExpression {
                                                             reason: format!("sort: first argument must be a function or builtin, got {}", func_value),
@@ -3122,7 +3122,7 @@ return Ok(accumulator);
                                                         let builtin = self.builtins.get(name).unwrap();
                                                         let a_forced = a.clone().force(self)?;
                                                         let b_forced = b.clone().force(self)?;
-                                                        builtin.call(&[b_forced, a_forced])?
+                                                        builtin.call_with_evaluator(&[b_forced, a_forced], self)?
                                                     }
                                                                 _ => unreachable!(),
                                                             };
@@ -4718,7 +4718,7 @@ return Ok(accumulator);
                                                 reason: format!("unknown builtin: {}", name),
                                             }
                                         })?;
-                                        builtin.call(&[a_forced, b_forced])?
+                                        builtin.call_with_evaluator(&[a_forced, b_forced], self)?
                                     }
                                     _ => return Err(Error::UnsupportedExpression {
                                         reason: format!("sort: first argument must be a function or builtin, got {}", func_value),
@@ -4740,7 +4740,7 @@ return Ok(accumulator);
                                                         let builtin = self.builtins.get(name).unwrap();
                                                         let a_forced = a.clone().deep_force(self)?;
                                                         let b_forced = b.clone().deep_force(self)?;
-                                                        builtin.call(&[b_forced, a_forced])?
+                                                        builtin.call_with_evaluator(&[b_forced, a_forced], self)?
                                                     }
                                                     _ => unreachable!(),
                                                 };
@@ -4804,7 +4804,7 @@ return Ok(accumulator);
 
                     // If it needs more arguments, it will return an error and we'll create a curried function
 
-                    match builtin.call(&[arg_value.clone()]) {
+                    match builtin.call_with_evaluator(&[arg_value.clone()], self) {
                         Ok(result) => return Ok(result),
 
                         Err(Error::UnsupportedExpression { reason })
