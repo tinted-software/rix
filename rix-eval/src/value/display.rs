@@ -84,6 +84,12 @@ impl fmt::Display for NixValue {
             NixValue::Derivation(drv) => {
                 write!(f, "<derivation {}>", drv.name)
             }
+            NixValue::DeferredLookup(name, _) => {
+                write!(f, "<deferred lookup: {}>", name)
+            }
+            NixValue::DeferredInherit(_, name) => {
+                write!(f, "<deferred inherit: {}>", name)
+            }
         }
     }
 }
@@ -105,6 +111,8 @@ impl PartialEq for NixValue {
             (NixValue::Path(a), NixValue::Path(b)) => a == b,
             (NixValue::StorePath(a), NixValue::StorePath(b)) => a == b,
             (NixValue::Derivation(a), NixValue::Derivation(b)) => Arc::ptr_eq(a, b),
+            (NixValue::DeferredLookup(a_name, _), NixValue::DeferredLookup(b_name, _)) => a_name == b_name,
+            (NixValue::DeferredInherit(_, a_name), NixValue::DeferredInherit(_, b_name)) => a_name == b_name,
             _ => false,
         }
     }

@@ -180,6 +180,12 @@ pub enum NixValue {
     /// ```
     #[serde(skip)]
     Derivation(Arc<Derivation>),
+    /// A deferred identifier lookup
+    #[serde(skip)]
+    DeferredLookup(String, crate::VariableScope),
+    /// A deferred attribute selection from a value (for lazy inherit)
+    #[serde(skip)]
+    DeferredInherit(Box<NixValue>, String),
 }
 
 impl NixValue {

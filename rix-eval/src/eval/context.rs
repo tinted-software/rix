@@ -21,8 +21,8 @@ pub struct VariableScope {
     /// Stack of 'with' attribute sets (lazy fallback)
     /// We use NixValue::Thunk to keep them lazy.
     withs: Vec<NixValue>,
-    /// Shared recursive scope (used by 'rec' and 'let' for mutual recursion)
-    recursive: Option<Arc<Mutex<HashMap<String, NixValue>>>>,
+    /// Shared recursive scopes (used by 'rec' and 'let' for mutual recursion)
+    recursive: Vec<Arc<Mutex<HashMap<String, NixValue>>>>,
 }
 
 impl VariableScope {
@@ -31,13 +31,13 @@ impl VariableScope {
         Self {
             vars: HashMap::new(),
             withs: Vec::new(),
-            recursive: None,
+            recursive: Vec::new(),
         }
     }
 
-    /// Set the shared recursive map for this scope
-    pub fn set_recursive(&mut self, rec: Arc<Mutex<HashMap<String, NixValue>>>) {
-        self.recursive = Some(rec);
+    /// Add a shared recursive map to this scope
+    pub fn push_recursive(&mut self, rec: Arc<Mutex<HashMap<String, NixValue>>>) {
+        self.recursive.push(rec);
     }
 
     /// Add a 'with' attribute set to the stack
@@ -50,18 +50,19 @@ impl VariableScope {
     /// NOTE: This only checks lexical and recursive variables.
     /// 'with' lookup requires an Evaluator and is handled in evaluator.rs.
     pub fn get(&self, name: &str) -> Option<NixValue> {
-        // 1. Check lexical variables (take precedence)
-        if let Some(v) = self.vars.get(name) {
-            return Some(v.clone());
-        }
-
-        // 2. Check recursive shared scope (for mutual recursion)
-        if let Some(ref rec) = self.recursive {
+        // 1. Check recursive shared scopes (for mutual recursion)
+        // Check from inner to outer. These shadow lexical variables from outer scopes.
+        for rec in self.recursive.iter().rev() {
             if let Ok(map) = rec.lock() {
                 if let Some(v) = map.get(name) {
                     return Some(v.clone());
                 }
             }
+        }
+
+        // 2. Check lexical variables (including parents)
+        if let Some(v) = self.vars.get(name) {
+            return Some(v.clone());
         }
 
         None
@@ -114,7 +115,7 @@ impl From<HashMap<String, NixValue>> for VariableScope {
         Self {
             vars,
             withs: Vec::new(),
-            recursive: None,
+            recursive: Vec::new(),
         }
     }
 }

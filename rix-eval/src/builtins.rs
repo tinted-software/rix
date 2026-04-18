@@ -374,6 +374,8 @@ impl Builtin for TypeOfBuiltin {
             NixValue::Derivation(_) => "lambda", // Derivations are callable in Nix
             NixValue::Thunk(_) => "thunk",
             NixValue::Function(_) => "lambda",
+            NixValue::DeferredLookup(_, _) => "thunk",
+            NixValue::DeferredInherit(_, _) => "thunk",
         };
         Ok(NixValue::String(type_name.to_string()))
     }
@@ -403,6 +405,8 @@ impl Builtin for ToStringBuiltin {
             NixValue::List(_)
             | NixValue::AttributeSet(_)
             | NixValue::Thunk(_)
+            | NixValue::DeferredLookup(_, _)
+            | NixValue::DeferredInherit(_, _)
             | NixValue::Function(_) => {
                 format!("{}", args[0])
             }

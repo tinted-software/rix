@@ -58,6 +58,29 @@ impl Evaluator {
         evaluator
     }
 
+    /// Deeply merge two attribute sets
+    pub fn merge_attribute_sets(&self, existing: NixValue, new: NixValue) -> Result<NixValue> {
+        let existing_forced = existing.force(self)?;
+        let new_forced = new.force(self)?;
+
+        match (existing_forced, new_forced) {
+            (NixValue::AttributeSet(mut existing_map), NixValue::AttributeSet(new_map)) => {
+                for (k, v) in new_map {
+                    if let Some(existing_v) = existing_map.remove(&k) {
+                        // Recursively merge nested sets
+                        let merged = self.merge_attribute_sets(existing_v, v)?;
+                        existing_map.insert(k, merged);
+                    } else {
+                        existing_map.insert(k, v);
+                    }
+                }
+                Ok(NixValue::AttributeSet(existing_map))
+            }
+            // If they are not both AttributeSets, the new value wins (Nix semantics)
+            (_, new_val) => Ok(new_val),
+        }
+    }
+
     fn register_basic_builtins(&mut self) {
         use crate::builtins::*;
 
@@ -562,6 +585,20 @@ impl Evaluator {
         self.evaluate_expr_with_scope_impl(expr, scope)
     }
 
+    /// Create a deferred lookup thunk
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The identifier to look up
+    /// * `scope` - The variable scope to use for evaluation
+    ///
+    /// # Returns
+    ///
+    /// The evaluated value or an error
+    pub fn create_lookup_thunk(&self, name: &str, scope: &VariableScope) -> Result<NixValue> {
+        Ok(NixValue::DeferredLookup(name.to_string(), scope.clone()))
+    }
+
     /// Internal implementation that evaluates an expression with a specific scope
     pub(crate) fn evaluate_expr_with_scope_impl(
         &self,
@@ -604,6 +641,7 @@ impl Evaluator {
             return Ok(value.clone());
         }
 
+        // 2. Check 'with' blocks if identifier not found in lexical/recursive scope
         // 2. Check 'with' blocks if identifier not found in lexical/recursive scope
         // Innermost 'with' takes precedence, so we iterate the stack in reverse
         for with_val in scope.withs().iter().rev() {
@@ -678,10 +716,26 @@ impl crate::value::NixValue {
     ///
     /// The evaluated value or an error
     pub fn force(self, evaluator: &crate::eval::Evaluator) -> Result<NixValue> {
-        match self {
-            NixValue::Thunk(thunk) => thunk.force(evaluator),
-            other => Ok(other),
+        let mut current = self;
+        while let NixValue::Thunk(thunk) = current {
+            current = thunk.force(evaluator)?;
         }
+        if let NixValue::DeferredLookup(name, scope) = current {
+            current = evaluator.lookup_identifier(&name, &scope)?;
+            // Recurse force in case lookup returned a thunk
+            current = current.force(evaluator)?;
+        }
+        if let NixValue::DeferredInherit(from, attr) = current {
+            let from_set = from.force(evaluator)?;
+            match from_set {
+                NixValue::AttributeSet(m) => {
+                    current = m.get(&attr).cloned().ok_or_else(|| Error::UnsupportedExpression { reason: format!("inherit(from): {} not found", attr) })?;
+                    current = current.force(evaluator)?;
+                }
+                _ => return Err(Error::UnsupportedExpression { reason: "inherit from non-attrset".to_string() }),
+            }
+        }
+        Ok(current)
     }
 
     /// Try to get this value as a string
@@ -771,6 +825,15 @@ impl crate::value::NixValue {
                     forced_attrs.insert(key, value.deep_force(evaluator)?);
                 }
                 Ok(NixValue::AttributeSet(forced_attrs))
+            }
+            NixValue::Thunk(_)
+            | NixValue::DeferredLookup(_, _)
+            | NixValue::DeferredInherit(_, _) => {
+                // These should have been handled by the call to self.force() above,
+                // but we include them to satisfy the compiler's exhaustiveness check.
+                // We don't use 'self' here because it was moved into the force() call above.
+                // 'value' is actually already forced, so this is just to satisfy the compiler.
+                unreachable!("Thunk/Deferred should have been converted to concrete value by force()")
             }
             other => Ok(other),
         }

@@ -9,6 +9,7 @@ use rix_parser::ast::{AttrpathValue, HasEntry, Inherit};
 use rowan::ast::AstNode;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 impl Evaluator {
     pub(crate) fn evaluate_attr_set(
@@ -17,7 +18,6 @@ impl Evaluator {
         scope: &VariableScope,
     ) -> Result<NixValue> {
         // Check if this is a recursive attribute set
-        // In rnix, recursive sets are represented differently - check if rec keyword is present
         let is_recursive = set.rec_token().is_some();
 
         if is_recursive {
@@ -33,407 +33,250 @@ impl Evaluator {
         scope: &VariableScope,
     ) -> Result<NixValue> {
         let mut attrs = HashMap::new();
+        let file_id = self.current_file_id();
 
         for entry in set.entries() {
-            let entry_syntax = entry.syntax();
-
-            // Check if this is an inherit statement
-            if let Some(inherit_node) = Inherit::cast(entry_syntax.clone()) {
-                // Handle inherit statement: inherit attr1 attr2 ...;
-                // or inherit (expr) attr1 attr2 ...;
-
-                // Get the inherit from expression (if any)
-                let inherit_from = inherit_node.from();
-
-                // Determine the scope to inherit from
-                let inherit_scope = if let Some(inherit_from_node) = inherit_from {
-                    // Get the expression from the InheritFrom node
-                    if let Some(from_expr) = inherit_from_node.expr() {
-                        // Evaluate and FORCE the from expression
-                        let from_value = self.evaluate_expr_with_scope(&from_expr, scope)?.force(self)?;
-                        match from_value {
-                            NixValue::AttributeSet(from_attrs) => {
-                                let mut inherit_scope = VariableScope::new();
-                                for (key, value) in from_attrs {
-                                    inherit_scope.insert(key, value);
-                                }
-                                inherit_scope
+            let syntax = entry.syntax();
+            if let Some(inherit) = Inherit::cast(syntax.clone()) {
+                let inherit_from = inherit.from();
+                let inherit_scope = if let Some(ref from) = inherit_from {
+                    if let Some(expr) = from.expr() {
+                        let val = self.evaluate_expr_with_scope(&expr, scope)?.force(self)?;
+                        match val {
+                            NixValue::AttributeSet(m) => {
+                                let mut s = VariableScope::new();
+                                for (k, v) in m { s.insert(k, v); }
+                                s
                             }
-                            _ => {
-                                return Err(Error::UnsupportedExpression {
-                                    reason: "inherit from expression must be an attribute set"
-                                        .to_string(),
-                                });
-                            }
+                            _ => return Err(Error::UnsupportedExpression { reason: "inherit from non-attrset".to_string() }),
                         }
-                    } else {
-                        // No expression in InheritFrom - inherit from current scope
-                        scope.clone()
-                    }
-                } else {
-                    // Inherit from the current scope
-                    scope.clone()
-                };
+                    } else { scope.clone() }
+                } else { scope.clone() };
 
-                // Get the attributes to inherit
-                for attr in inherit_node.attrs() {
-                    // Get the attribute name (can be identifier or string literal)
-                    // For string literals like "foo bar", we need to extract the string value
-                    let key = if let Some(ident) =
-                        rix_parser::ast::Ident::cast(attr.syntax().clone())
-                    {
-                        ident.to_string()
-                    } else {
-                        // Try to get the text representation and handle string literals
-                        let attr_text = attr.syntax().text().to_string();
-                        // Check if it's a string literal (starts and ends with quotes)
-                        if attr_text.starts_with('"')
-                            && attr_text.ends_with('"')
-                            && attr_text.len() >= 2
-                        {
-                            // String literal - strip quotes
-                            attr_text[1..attr_text.len() - 1].to_string()
-                        } else if let Some(string) =
-                            rix_parser::ast::Str::cast(attr.syntax().clone())
-                        {
-                            // String expression - evaluate it to get the string value
-                            let str_value = self.evaluate_string(&string, scope)?;
-                            match str_value {
-                                NixValue::String(s) => s,
-                                _ => {
-                                    return Err(Error::UnsupportedExpression {
-                                        reason:
-                                            "inherit: string expression must evaluate to a string"
-                                                .to_string(),
-                                    });
-                                }
-                            }
+                for attr in inherit.attrs() {
+                    let key = attr.syntax().text().to_string().trim_matches('"').to_string();
+                    if inherit_from.is_some() {
+                        if let Some(val) = inherit_scope.get(&key) {
+                            attrs.insert(key, val);
                         } else {
-                            // Try to evaluate as an expression (for dynamic attribute names)
-                            if let Some(expr) = rix_parser::ast::Expr::cast(attr.syntax().clone()) {
-                                let expr_value = self.evaluate_expr_with_scope(&expr, scope)?;
-                                match expr_value {
-                                    NixValue::String(s) => s,
-                                    _ => {
-                                        return Err(Error::UnsupportedExpression {
-                                            reason: "inherit: expression must evaluate to a string"
-                                                .to_string(),
-                                        });
-                                    }
-                                }
-                            } else {
-                                // Fallback: use text representation, trimming quotes if present
-                                attr_text.trim_matches('"').to_string()
-                            }
+                            return Err(Error::UnsupportedExpression { reason: format!("inherit from: attr {} not found", key) });
                         }
-                    };
-
-                    // Look up the value in the inherit scope
-                    if let Some(value) = inherit_scope.get(&key) {
-                        attrs.insert(key, value.clone());
                     } else {
-                        return Err(Error::UnsupportedExpression {
-                            reason: format!("inherit: attribute '{}' not found in scope", key),
-                        });
+                        let val = if scope.get(&key).is_some() {
+                             // If it's definitely lexical, we can look it up now
+                             // But wait! It might be shadowed by a 'with' later?
+                             // No, lexical takes precedence.
+                             scope.get(&key).unwrap()
+                        } else if !scope.withs().is_empty() {
+                             // If it might be in 'with', use deferred lookup
+                             self.create_lookup_thunk(&key, scope)?
+                        } else {
+                             // Definitely missing
+                             return Err(Error::UnsupportedExpression { reason: format!("unknown identifier: {}", key) });
+                        };
+                        attrs.insert(key, val);
                     }
                 }
-            } else if let Some(attrpath_value) = AttrpathValue::cast(entry_syntax.clone()) {
-                // Regular attribute assignment: key = value;
-                // Handle nested attribute paths like foo.bar = "baz"
-
-                let attrpath =
-                    attrpath_value
-                        .attrpath()
-                        .ok_or_else(|| Error::UnsupportedExpression {
-                            reason: "attribute entry missing attrpath".to_string(),
-                        })?;
-
-                let value_expr =
-                    attrpath_value
-                        .value()
-                        .ok_or_else(|| Error::UnsupportedExpression {
-                            reason: "attribute entry missing value".to_string(),
-                        })?;
-
-                // Collect all attributes in the path
-                // Attribute names can be identifiers, string literals, or string expressions (with interpolation)
-                let mut attr_names = Vec::new();
+            } else if let Some(apv) = AttrpathValue::cast(syntax.clone()) {
+                let attrpath = apv.attrpath().ok_or_else(|| Error::UnsupportedExpression { reason: "missing attrpath".to_string() })?;
+                let value_expr = apv.value().ok_or_else(|| Error::UnsupportedExpression { reason: "missing value".to_string() })?;
+                
+                let mut path = Vec::new();
                 for attr in attrpath.attrs() {
                     if let Some(ident) = rix_parser::ast::Ident::cast(attr.syntax().clone()) {
-                        attr_names.push(ident.to_string());
-                    } else if let Some(expr) = rix_parser::ast::Expr::cast(attr.syntax().clone()) {
+                        path.push(ident.to_string());
+                    } else if let Some(dynamic) = rix_parser::ast::Dynamic::cast(attr.syntax().clone()) {
+                        let expr = dynamic.expr().ok_or_else(|| Error::UnsupportedExpression { reason: "dynamic attr missing expr".to_string() })?;
                         let name_val = self.evaluate_expr_with_scope(&expr, scope)?.force(self)?;
-                        attr_names.push(name_val.as_string()?);
+                        path.push(name_val.as_string()?);
+                    } else if let Some(str_node) = rix_parser::ast::Str::cast(attr.syntax().clone()) {
+                        let name_val = self.evaluate_string(&str_node, scope)?;
+                        path.push(name_val.as_string()?);
                     } else {
-                        attr_names.push(attr.to_string().trim_matches('"').to_string());
+                        path.push(attr.syntax().text().to_string().trim_matches('"').to_string());
                     }
                 }
 
-                if attr_names.is_empty() {
-                    return Err(Error::UnsupportedExpression {
-                        reason: "attribute key must be an identifier".to_string(),
-                    });
+                let thunk = NixValue::Thunk(Arc::new(thunk::Thunk::new(&value_expr, scope.clone(), file_id)));
+                
+                let mut nested_val = thunk;
+                for key in path.iter().skip(1).rev() {
+                    let mut inner_map = HashMap::new();
+                    inner_map.insert(key.clone(), nested_val);
+                    nested_val = NixValue::AttributeSet(inner_map);
                 }
 
-                // Create a thunk for lazy evaluation of attribute values
-                let file_id = self.current_file_id();
-                let thunk = thunk::Thunk::new(&value_expr, scope.clone(), file_id);
-                let value = NixValue::Thunk(Arc::new(thunk));
-
-                // Handle nested attribute paths: foo.bar.baz = value
-                // Create nested attribute sets as needed
-                if attr_names.len() == 1 {
-                    // Simple case: foo = value
-                    // If the key already exists and both are attribute sets, merge them
-                    let key = &attr_names[0];
-                    if let Some(existing) = attrs.get_mut(key) {
-                        // Force both values to check if they're attribute sets
-                        // In Nix, attribute set merging happens eagerly
-                        let existing_forced = existing.clone().force(self)?;
-                        let new_forced = value.clone().force(self)?;
-                        match (existing_forced, new_forced) {
-                            (
-                                NixValue::AttributeSet(mut existing_map),
-                                NixValue::AttributeSet(new_map),
-                            ) => {
-                                // Merge the new map into the existing map
-                                for (k, v) in new_map {
-                                    existing_map.insert(k.clone(), v.clone());
-                                }
-                                // Update the existing value with the merged map
-                                *existing = NixValue::AttributeSet(existing_map);
-                            }
-                            _ => {
-                                // Overwrite if not both attribute sets
-                                *existing = value;
-                            }
-                        }
-                    } else {
-                        attrs.insert(key.clone(), value);
-                    }
+                let first_key = path[0].clone();
+                if let Some(existing) = attrs.remove(&first_key) {
+                    let merged = self.merge_attribute_sets(existing, nested_val)?;
+                    attrs.insert(first_key, merged);
                 } else {
-                    // Nested case: foo.bar = value
-                    // Build nested structure from the inside out
-                    // For "a.b = 15", attr_names = ["a", "b"]
-                    // We want to create { a = { b = 15 } }
-                    // So we start with the value (15), then wrap it with "b", then wrap that with "a"
-                    let mut nested_value = value;
-
-                    // Start from the last key and work backwards (skip the first key, we'll handle it separately)
-                    // For ["a", "b"], we want to iterate over ["b"] (the last one)
-                    // Then wrap it with "a" (the first one)
-                    for key in attr_names.iter().rev().take(attr_names.len() - 1) {
-                        let mut inner_map = HashMap::new();
-                        inner_map.insert(key.clone(), nested_value);
-                        nested_value = NixValue::AttributeSet(inner_map);
-                    }
-
-                    // Now merge into the top-level attrs using the first key
-                    let first_key = &attr_names[0];
-                    if let Some(existing) = attrs.get_mut(first_key) {
-                        // Merge with existing nested structure
-                        let existing_forced = existing.clone().force(self)?;
-                        match existing_forced {
-                            NixValue::AttributeSet(mut existing_map) => {
-                                if let NixValue::AttributeSet(new_map) = nested_value {
-                                    // Merge the new map into the existing map
-                                    for (k, v) in new_map {
-                                        existing_map.insert(k.clone(), v.clone());
-                                    }
-                                    *existing = NixValue::AttributeSet(existing_map);
-                                } else {
-                                    // Overwrite if not an attribute set
-                                    *existing = nested_value;
-                                }
-                            }
-                            _ => {
-                                // Overwrite if not an attribute set
-                                *existing = nested_value;
-                            }
-                        }
-                    } else {
-                        // Insert new nested structure
-                        attrs.insert(first_key.clone(), nested_value);
-                    }
+                    attrs.insert(first_key, nested_val);
                 }
-            } else {
-                return Err(Error::UnsupportedExpression {
-                    reason: format!("unsupported attribute set entry: {:?}", entry_syntax.kind()),
-                });
             }
         }
 
         Ok(NixValue::AttributeSet(attrs))
     }
 
-    /// Evaluate a recursive attribute set
-    ///
-    /// Recursive attribute sets like `rec { x = y; y = 1; }` allow forward references.
-    /// The key is to create a scope that includes all attribute names (as thunks) before
-    /// evaluating any values, so that each value can reference other attributes.
-    ///
-    /// Implementation strategy:
-    /// 1. First pass: Collect all attribute names and expressions
-    /// 2. Create a recursive scope that will contain all attribute thunks
-    /// 3. Second pass: Create thunks for each attribute, where each thunk's closure
-    ///    includes the recursive scope. As we add thunks to the scope, subsequent
-
-    fn evaluate_recursive_attr_set(
+    pub(crate) fn evaluate_recursive_attr_set(
         &self,
         set: &rix_parser::ast::AttrSet,
         scope: &VariableScope,
     ) -> Result<NixValue> {
-        // First pass: Collect all attribute names and expressions
-        let mut attr_entries = Vec::new();
-        let mut inherit_attrs = HashMap::new();
+        let file_id = self.current_file_id();
+        let mut top_level_bindings: HashMap<String, NixValue> = HashMap::new();
+        let shared_rec_map = Arc::new(Mutex::new(HashMap::new()));
+        let mut rec_scope = scope.clone();
+        rec_scope.push_recursive(shared_rec_map.clone());
 
         for entry in set.entries() {
-            let entry_syntax = entry.syntax();
-
-            // Check if this is an inherit statement
-            if let Some(inherit_node) = Inherit::cast(entry_syntax.clone()) {
-                // Handle inherit in recursive sets
-                let inherit_from = inherit_node.from();
-                let inherit_scope = if let Some(inherit_from_node) = inherit_from {
-                    if let Some(from_expr) = inherit_from_node.expr() {
-                        let from_value = self.evaluate_expr_with_scope(&from_expr, scope)?.force(self)?;
-                        match from_value {
-                            NixValue::AttributeSet(from_attrs) => {
-                                let mut inherit_scope = VariableScope::new();
-                                for (key, value) in from_attrs {
-                                    inherit_scope.insert(key, value);
-                                }
-                                inherit_scope
-                            }
-                            _ => {
-                                return Err(Error::UnsupportedExpression {
-                                    reason: "inherit from expression must be an attribute set"
-                                        .to_string(),
-                                });
-                            }
-                        }
+            let syntax = entry.syntax();
+            if let Some(inherit) = Inherit::cast(syntax.clone()) {
+                let inherit_from = inherit.from();
+                for attr in inherit.attrs() {
+                    let key = attr.syntax().text().to_string().trim_matches('"').to_string();
+                    let val = if let Some(ref from) = inherit_from {
+                        let from_expr = from.expr().ok_or_else(|| Error::UnsupportedExpression { reason: "inherit(from) missing expr".to_string() })?;
+                        let from_val = self.evaluate_expr_with_scope(&from_expr, &rec_scope)?;
+                        NixValue::DeferredInherit(Box::new(from_val), key.clone())
                     } else {
-                        scope.clone()
-                    }
-                } else {
-                    scope.clone()
-                };
-
-                // Collect inherited attributes
-                for attr in inherit_node.attrs() {
-                    let key = if let Some(ident) =
-                        rix_parser::ast::Ident::cast(attr.syntax().clone())
-                    {
-                        ident.to_string()
-                    } else if let Some(string) = rix_parser::ast::Str::cast(attr.syntax().clone()) {
-                        let str_value = self.evaluate_string(&string, scope)?;
-                        match str_value {
-                            NixValue::String(s) => s,
-                            _ => {
-                                return Err(Error::UnsupportedExpression {
-                                    reason: "inherit: string expression must evaluate to a string"
-                                        .to_string(),
-                                });
-                            }
-                        }
-                    } else {
-                        if let Some(expr) = rix_parser::ast::Expr::cast(attr.syntax().clone()) {
-                            let expr_value = self.evaluate_expr_with_scope(&expr, scope)?;
-                            match expr_value {
-                                NixValue::String(s) => s,
-                                _ => {
-                                    return Err(Error::UnsupportedExpression {
-                                        reason: "inherit: expression must evaluate to a string"
-                                            .to_string(),
-                                    });
-                                }
-                            }
+                        if let Some(v) = scope.get(&key) {
+                            v
+                        } else if !scope.withs().is_empty() {
+                            self.create_lookup_thunk(&key, scope)?
                         } else {
-                            attr.syntax()
-                                .text()
-                                .to_string()
-                                .trim_matches('"')
-                                .to_string()
+                            return Err(Error::UnsupportedExpression { reason: format!("unknown identifier: {}", key) });
                         }
                     };
 
-                    if let Some(value) = inherit_scope.get(&key) {
-                        inherit_attrs.insert(key.clone(), value.clone());
+                    let final_val = if let Some(existing) = top_level_bindings.remove(&key) {
+                        self.merge_attribute_sets(existing, val)?
                     } else {
-                        return Err(Error::UnsupportedExpression {
-                            reason: format!("inherit: attribute '{}' not found in scope", key),
-                        });
+                        val
+                    };
+                    top_level_bindings.insert(key.clone(), final_val.clone());
+                    
+                    // Update scope immediately
+                    shared_rec_map.lock().unwrap().insert(key.clone(), final_val.clone());
+                    rec_scope.insert(key, final_val);
+                }
+            } else if let Some(apv) = AttrpathValue::cast(syntax.clone()) {
+                let attrpath = apv.attrpath().ok_or_else(|| Error::UnsupportedExpression { reason: "missing attrpath".to_string() })?;
+                let value_expr = apv.value().ok_or_else(|| Error::UnsupportedExpression { reason: "missing value".to_string() })?;
+                
+                let mut path = Vec::new();
+                for attr in attrpath.attrs() {
+                    if let Some(ident) = rix_parser::ast::Ident::cast(attr.syntax().clone()) {
+                        path.push(ident.to_string());
+                    } else if let Some(dynamic) = rix_parser::ast::Dynamic::cast(attr.syntax().clone()) {
+                        let expr = dynamic.expr().ok_or_else(|| Error::UnsupportedExpression { reason: "dynamic attr missing expr".to_string() })?;
+                        let name_val = self.evaluate_expr_with_scope(&expr, &rec_scope)?.force(self)?;
+                        path.push(name_val.as_string()?);
+                    } else {
+                        path.push(attr.syntax().text().to_string().trim_matches('"').to_string());
                     }
                 }
-            } else if let Some(attrpath_value) = AttrpathValue::cast(entry_syntax.clone()) {
-                // Regular attribute assignment
-                let attrpath =
-                    attrpath_value
-                        .attrpath()
-                        .ok_or_else(|| Error::UnsupportedExpression {
-                            reason: "attribute entry missing attrpath".to_string(),
-                        })?;
 
-                let key = attrpath
-                    .attrs()
-                    .next()
-                    .map(|attr| attr.to_string())
-                    .ok_or_else(|| Error::UnsupportedExpression {
-                        reason: "attribute key must be an identifier".to_string(),
-                    })?;
+                let mut nested_val = NixValue::Thunk(Arc::new(thunk::Thunk::new(&value_expr, rec_scope.clone(), file_id)));
+                for key in path.iter().skip(1).rev() {
+                    let mut inner_map = HashMap::new();
+                    inner_map.insert(key.clone(), nested_val);
+                    nested_val = NixValue::AttributeSet(inner_map);
+                }
 
-                let value_expr =
-                    attrpath_value
-                        .value()
-                        .ok_or_else(|| Error::UnsupportedExpression {
-                            reason: "attribute entry missing value".to_string(),
-                        })?;
-
-                // Store the entry for later evaluation
-                attr_entries.push((key, value_expr));
+                let first_key = path[0].clone();
+                let final_val = if let Some(existing) = top_level_bindings.remove(&first_key) {
+                    self.merge_attribute_sets(existing, nested_val)?
+                } else {
+                    nested_val
+                };
+                top_level_bindings.insert(first_key.clone(), final_val.clone());
+                
+                // Update scope immediately
+                shared_rec_map.lock().unwrap().insert(first_key.clone(), final_val.clone());
+                rec_scope.insert(first_key, final_val);
             }
         }
 
-        // For recursive sets, all attributes must be in scope when evaluating any attribute.
-        // Since thunks capture their closure at creation time, we need to create all thunks
-        // with a scope that includes all attribute names.
-        //
-        // Strategy: Create all thunks first, then build a scope containing all thunks.
-        // However, thunks are immutable once created, so we can't update their closures.
-        //
-        // Workaround: Create thunks with a scope that includes all attribute names as
-        // placeholders (Null), then when a thunk is forced and looks up an attribute,
-        // it will find Null. But that's not correct either.
-        //
-        // The correct solution requires thunks to support dynamic scope lookup or
-        // a shared mutable scope. For now, we'll use a sequential approach that supports
-        // forward references (later attributes can reference earlier ones).
-        //
-        // To support full mutual references, we use a shared recursive scope
-        let shared_rec_map = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
-        let mut rec_scope = scope.clone();
-        rec_scope.set_recursive(shared_rec_map.clone());
-        
-        let mut attrs = HashMap::new();
+        Ok(NixValue::AttributeSet(top_level_bindings))
+    }
 
-        // Add inherited attributes to the recursive scope and the result set
-        for (key, value) in &inherit_attrs {
-            shared_rec_map.lock().unwrap().insert(key.clone(), value.clone());
-            attrs.insert(key.clone(), value.clone());
+    pub(crate) fn evaluate_select(
+        &self,
+        select: &rix_parser::ast::Select,
+        scope: &VariableScope,
+    ) -> Result<NixValue> {
+        let set_expr = select.expr().ok_or_else(|| Error::UnsupportedExpression { reason: "select missing expression".to_string() })?;
+        let mut current = self.evaluate_expr_with_scope(&set_expr, scope)?.force(self)?;
+
+        if let Some(attrpath) = select.attrpath() {
+            for attr in attrpath.attrs() {
+                let key = if let Some(ident) = rix_parser::ast::Ident::cast(attr.syntax().clone()) {
+                    ident.to_string()
+                } else if let Some(dynamic) = rix_parser::ast::Dynamic::cast(attr.syntax().clone()) {
+                    let expr = dynamic.expr().ok_or_else(|| Error::UnsupportedExpression { reason: "dynamic attr missing expr".to_string() })?;
+                    self.evaluate_expr_with_scope(&expr, scope)?.force(self)?.as_string()?
+                } else {
+                    attr.syntax().text().to_string().trim_matches('"').to_string()
+                };
+
+                match current {
+                    NixValue::AttributeSet(m) => {
+                        if let Some(val) = m.get(&key) {
+                            current = val.clone().force(self)?;
+                        } else {
+                            if let Some(default) = select.default_expr() {
+                                return self.evaluate_expr_with_scope(&default, scope);
+                            } else {
+                                return Err(Error::UnsupportedExpression { reason: format!("attribute '{}' not found", key) });
+                            }
+                        }
+                    }
+                    _ => {
+                        if let Some(default) = select.default_expr() {
+                            return self.evaluate_expr_with_scope(&default, scope);
+                        } else {
+                            return Err(Error::UnsupportedExpression { reason: format!("cannot select from non-attrset: {}", current) });
+                        }
+                    }
+                }
+            }
         }
+        Ok(current)
+    }
 
-        // Create thunks for all attributes
-        // Each thunk's closure includes the shared recursive map, allowing mutual references
-        let file_id = self.current_file_id();
-        for (key, value_expr) in &attr_entries {
-            let thunk = thunk::Thunk::new(value_expr, rec_scope.clone(), file_id);
-            let thunk_value = NixValue::Thunk(Arc::new(thunk));
+    pub(crate) fn evaluate_has_attr(
+        &self,
+        has_attr: &rix_parser::ast::HasAttr,
+        scope: &VariableScope,
+    ) -> Result<NixValue> {
+        let set_expr = has_attr.expr().ok_or_else(|| Error::UnsupportedExpression { reason: "has_attr missing expression".to_string() })?;
+        let mut current = self.evaluate_expr_with_scope(&set_expr, scope)?.force(self)?;
 
-            // Add to both the shared map (for mutual recursion) and result attribute set
-            shared_rec_map.lock().unwrap().insert(key.clone(), thunk_value.clone());
-            attrs.insert(key.clone(), thunk_value);
+        if let Some(attrpath) = has_attr.attrpath() {
+            for attr in attrpath.attrs() {
+                let key = if let Some(ident) = rix_parser::ast::Ident::cast(attr.syntax().clone()) {
+                    ident.to_string()
+                } else if let Some(dynamic) = rix_parser::ast::Dynamic::cast(attr.syntax().clone()) {
+                    let expr = dynamic.expr().ok_or_else(|| Error::UnsupportedExpression { reason: "dynamic attr missing expr".to_string() })?;
+                    self.evaluate_expr_with_scope(&expr, scope)?.force(self)?.as_string()?
+                } else {
+                    attr.syntax().text().to_string().trim_matches('"').to_string()
+                };
+
+                match current {
+                    NixValue::AttributeSet(m) => {
+                        if let Some(val) = m.get(&key) {
+                            current = val.clone().force(self)?;
+                        } else {
+                            return Ok(NixValue::Boolean(false));
+                        }
+                    }
+                    _ => return Ok(NixValue::Boolean(false)),
+                }
+            }
         }
-
-        Ok(NixValue::AttributeSet(attrs))
+        Ok(NixValue::Boolean(true))
     }
 }

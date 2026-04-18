@@ -126,6 +126,8 @@ impl Evaluator {
                             NixValue::List(_)
                             | NixValue::AttributeSet(_)
                             | NixValue::Thunk(_)
+                            | NixValue::DeferredLookup(_, _)
+                            | NixValue::DeferredInherit(_, _)
                             | NixValue::Function(_) => {
                                 // For complex types, use their Display implementation
                                 format!("{}", value_forced)
