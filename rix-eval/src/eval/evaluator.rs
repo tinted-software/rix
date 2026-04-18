@@ -571,88 +571,7 @@ impl Evaluator {
         match expr {
             Expr::Literal(literal) => self.evaluate_literal(literal),
             Expr::Str(str_expr) => self.evaluate_string(str_expr, scope),
-            Expr::Ident(ident) => {
-                // Handle identifiers (true, false, null, variables, builtins)
-                // IMPORTANT: Check scope first! Variables in scope (including shadowed builtins)
-                // take precedence over builtin values.
-                let text = ident.to_string();
-
-                // Check if it's a variable in scope first (scope takes precedence)
-                if let Some(value) = scope.get(&text) {
-                    return Ok(value.clone());
-                }
-
-                // Check 'with' blocks if identifier not found in lexical/recursive scope
-                // Innermost 'with' takes precedence, so we iterate the stack in reverse
-                for with_val in scope.withs().iter().rev() {
-                    let with_set = with_val.clone().force(self)?;
-                    if let NixValue::AttributeSet(attrs) = with_set {
-                        if let Some(v) = attrs.get(&text) {
-                            // Found in 'with' scope - return it
-                            // To maintain laziness, we return the value directly
-                            // (it might be a thunk that will be forced later)
-                            return Ok(v.clone());
-                        }
-                    }
-                }
-
-                // If not in scope, check for builtin values
-                match text.as_str() {
-                    "true" => Ok(NixValue::Boolean(true)),
-                    "false" => Ok(NixValue::Boolean(false)),
-                    "null" => Ok(NixValue::Null),
-                    "builtins" => {
-                        // Return an attribute set containing all builtin functions
-                        // Each builtin is accessible via builtins.<name>
-                        // We'll handle this specially in evaluate_select and evaluate_apply
-                        let mut builtins_attrs = HashMap::new();
-                        for (name, _builtin) in &self.builtins {
-                            // Store a marker that we can detect in evaluate_select
-                            builtins_attrs.insert(
-                                name.clone(),
-                                NixValue::String(format!("__builtin_func:{}", name)),
-                            );
-                        }
-                        // Add builtins.builtins pointing to itself (recursive reference)
-                        // We'll use a special marker that evaluate_select will recognize
-                        builtins_attrs.insert(
-                            "builtins".to_string(),
-                            NixValue::String("__builtins_self__".to_string()),
-                        );
-                        Ok(NixValue::AttributeSet(builtins_attrs))
-                    }
-                    _ => {
-                        // Check if it's a builtin function
-                        // For builtins that need special handling (map, all, any, etc.), we return
-                        // a marker string so evaluate_apply can handle them specially
-                        if self.builtins.contains_key(&text) {
-                            // Builtins that need evaluator context return a marker
-                            if text == "map"
-                                || text == "all"
-                                || text == "any"
-                                || text == "filter"
-                                || text == "concatMap"
-                                || text == "catAttrs"
-                                || text == "attrValues"
-                                || text == "tryEval"
-                            {
-                                // Return a marker so evaluate_apply can handle it
-                                return Ok(NixValue::String(format!("__direct_builtin:{}", text)));
-                            }
-                            // Other builtins are functions, not values - they need to be called
-                            return Err(Error::UnsupportedExpression {
-                                reason: format!(
-                                    "builtin '{}' cannot be used as a value, it must be called",
-                                    text
-                                ),
-                            });
-                        }
-                        Err(Error::UnsupportedExpression {
-                            reason: format!("unknown identifier: {}", text),
-                        })
-                    }
-                }
-            }
+            Expr::Ident(ident) => self.lookup_identifier(&ident.to_string(), scope),
             Expr::AttrSet(set) => self.evaluate_attr_set(set, scope),
             Expr::List(list) => self.evaluate_list(list, scope),
             Expr::Lambda(lambda) => self.evaluate_lambda(lambda, scope),
@@ -677,6 +596,73 @@ impl Evaluator {
     // String and literal evaluation methods are in expressions/literals.rs
 }
 
+impl Evaluator {
+    /// Look up an identifier in the scope, follows Nix rules
+    pub fn lookup_identifier(&self, text: &str, scope: &VariableScope) -> Result<NixValue> {
+        // 1. Check if it's a variable in scope first (lexical/recursive takes precedence)
+        if let Some(value) = scope.get(text) {
+            return Ok(value.clone());
+        }
+
+        // 2. Check 'with' blocks if identifier not found in lexical/recursive scope
+        // Innermost 'with' takes precedence, so we iterate the stack in reverse
+        for with_val in scope.withs().iter().rev() {
+            let with_set = with_val.clone().force(self)?;
+            if let NixValue::AttributeSet(attrs) = with_set {
+                if let Some(v) = attrs.get(text) {
+                    return Ok(v.clone());
+                }
+            }
+        }
+
+        // 3. If not in scope, check for builtin values
+        match text {
+            "true" => Ok(NixValue::Boolean(true)),
+            "false" => Ok(NixValue::Boolean(false)),
+            "null" => Ok(NixValue::Null),
+            "builtins" => {
+                let mut builtins_attrs = HashMap::new();
+                for (name, _builtin) in &self.builtins {
+                    builtins_attrs.insert(
+                        name.clone(),
+                        NixValue::String(format!("__builtin_func:{}", name)),
+                    );
+                }
+                builtins_attrs.insert(
+                    "builtins".to_string(),
+                    NixValue::String("__builtins_self__".to_string()),
+                );
+                Ok(NixValue::AttributeSet(builtins_attrs))
+            }
+            _ => {
+                // Check if it's a global builtin (like map, all, filter)
+                if self.builtins.contains_key(text) {
+                    if text == "map"
+                        || text == "all"
+                        || text == "any"
+                        || text == "filter"
+                        || text == "concatMap"
+                        || text == "catAttrs"
+                        || text == "attrValues"
+                        || text == "tryEval"
+                    {
+                        return Ok(NixValue::String(format!("__direct_builtin:{}", text)));
+                    }
+                    return Err(Error::UnsupportedExpression {
+                        reason: format!(
+                            "builtin '{}' cannot be used as a value, it must be called",
+                            text
+                        ),
+                    });
+                }
+                Err(Error::UnsupportedExpression {
+                    reason: format!("unknown identifier: {}", text),
+                })
+            }
+        }
+    }
+}
+
 // NixValue force methods (moved here to avoid circular dependencies)
 impl crate::value::NixValue {
     /// Force evaluation of this value if it's a thunk
@@ -695,6 +681,26 @@ impl crate::value::NixValue {
         match self {
             NixValue::Thunk(thunk) => thunk.force(evaluator),
             other => Ok(other),
+        }
+    }
+
+    /// Try to get this value as a string
+    pub fn as_string(&self) -> Result<String> {
+        match self {
+            NixValue::String(s) => Ok(s.clone()),
+            _ => Err(crate::error::Error::UnsupportedExpression {
+                reason: format!("value is {:?}, not a string", self),
+            }),
+        }
+    }
+
+    /// Try to get this value as a boolean
+    pub fn as_bool(&self) -> Result<bool> {
+        match self {
+            NixValue::Boolean(b) => Ok(*b),
+            _ => Err(crate::error::Error::UnsupportedExpression {
+                reason: "value is not a boolean".to_string(),
+            }),
         }
     }
 

@@ -49,11 +49,10 @@ impl Evaluator {
                 let inherit_scope = if let Some(inherit_from_node) = inherit_from {
                     // Get the expression from the InheritFrom node
                     if let Some(from_expr) = inherit_from_node.expr() {
-                        // Evaluate the from expression to get an attribute set
-                        let from_value = self.evaluate_expr_with_scope(&from_expr, scope)?;
+                        // Evaluate and FORCE the from expression
+                        let from_value = self.evaluate_expr_with_scope(&from_expr, scope)?.force(self)?;
                         match from_value {
                             NixValue::AttributeSet(from_attrs) => {
-                                // Create a scope from the attribute set
                                 let mut inherit_scope = VariableScope::new();
                                 for (key, value) in from_attrs {
                                     inherit_scope.insert(key, value);
@@ -160,41 +159,13 @@ impl Evaluator {
                 // Attribute names can be identifiers, string literals, or string expressions (with interpolation)
                 let mut attr_names = Vec::new();
                 for attr in attrpath.attrs() {
-                    // Check if it's a string expression (with interpolation like "${expr}")
-                    if let Some(str_node) = rix_parser::ast::Str::cast(attr.syntax().clone()) {
-                        // Evaluate the string expression to get the key name
-                        // This handles dynamic keys like "${builtins.throw "a"}"
-                        match self.evaluate_string(&str_node, scope) {
-                            Ok(NixValue::String(s)) => {
-                                attr_names.push(s);
-                            }
-                            Ok(_) => {
-                                // If evaluation succeeds but doesn't return a string, use text representation
-                                let attr_str = attr.to_string().trim_matches('"').to_string();
-                                attr_names.push(attr_str);
-                            }
-                            Err(e) => {
-                                // If evaluation fails, propagate the error
-                                // This allows tryEval to catch errors from attribute keys
-                                return Err(e);
-                            }
-                        }
-                    } else if let Some(ident) = rix_parser::ast::Ident::cast(attr.syntax().clone())
-                    {
-                        // Simple identifier
+                    if let Some(ident) = rix_parser::ast::Ident::cast(attr.syntax().clone()) {
                         attr_names.push(ident.to_string());
+                    } else if let Some(expr) = rix_parser::ast::Expr::cast(attr.syntax().clone()) {
+                        let name_val = self.evaluate_expr_with_scope(&expr, scope)?.force(self)?;
+                        attr_names.push(name_val.as_string()?);
                     } else {
-                        // Fallback: try to get text representation
-                        let attr_str = attr.to_string();
-                        // Check if it's a string literal (starts and ends with quotes)
-                        if attr_str.starts_with('"')
-                            && attr_str.ends_with('"')
-                            && attr_str.len() >= 2
-                        {
-                            attr_names.push(attr_str[1..attr_str.len() - 1].to_string());
-                        } else {
-                            attr_names.push(attr_str);
-                        }
+                        attr_names.push(attr.to_string().trim_matches('"').to_string());
                     }
                 }
 
@@ -325,7 +296,7 @@ impl Evaluator {
                 let inherit_from = inherit_node.from();
                 let inherit_scope = if let Some(inherit_from_node) = inherit_from {
                     if let Some(from_expr) = inherit_from_node.expr() {
-                        let from_value = self.evaluate_expr_with_scope(&from_expr, scope)?;
+                        let from_value = self.evaluate_expr_with_scope(&from_expr, scope)?.force(self)?;
                         match from_value {
                             NixValue::AttributeSet(from_attrs) => {
                                 let mut inherit_scope = VariableScope::new();
@@ -440,7 +411,7 @@ impl Evaluator {
         //
         // To support full mutual references, we use a shared recursive scope
         let shared_rec_map = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
-        let mut rec_scope = self.scope.clone();
+        let mut rec_scope = scope.clone();
         rec_scope.set_recursive(shared_rec_map.clone());
         
         let mut attrs = HashMap::new();

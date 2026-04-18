@@ -38,7 +38,21 @@ impl fmt::Display for NixValue {
                 sorted_keys.sort();
                 let entries: Vec<String> = sorted_keys
                     .iter()
-                    .map(|k| format!("{} = {};", k, attrs[*k]))
+                    .map(|k| {
+                        let needs_quoting = k.is_empty()
+                            || k.chars().next().map(|c| !c.is_ascii_alphabetic() && c != '_').unwrap_or(true)
+                            || k.chars().any(|c| !c.is_ascii_alphanumeric() && c != '_' && c != '-' && c != '\'');
+                        
+                        let keywords = ["if", "then", "else", "assert", "with", "let", "in", "rec", "inherit"];
+                        let needs_quoting = needs_quoting || keywords.contains(&k.as_str());
+
+                        let key_disp = if needs_quoting {
+                            format!("\"{}\"", k)
+                        } else {
+                            k.to_string()
+                        };
+                        format!("{} = {};", key_disp, attrs[*k])
+                    })
                     .collect();
                 if entries.is_empty() {
                     write!(f, "{{ }}")
