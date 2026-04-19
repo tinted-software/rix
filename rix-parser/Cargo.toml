@@ -11,8 +11,8 @@ harness = false
 name = "all-packages"
 
 [dependencies]
-rowan = "0.16"
+rowan.workspace = true
 
 [dev-dependencies]
-criterion = "0.8"
-expect-test = "1.5.1"
+criterion.workspace = true
+expect-test.workspace = true
