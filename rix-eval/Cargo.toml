@@ -22,6 +22,7 @@ base32.workspace = true
 codespan.workspace = true
 codespan-reporting.workspace = true
 regex.workspace = true
+quick-xml.workspace = true
 rix-parser.workspace = true
 
 [dev-dependencies]

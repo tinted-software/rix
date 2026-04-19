@@ -10,6 +10,7 @@ mod function;
 mod prelude;
 mod thunk;
 mod value;
+mod xml;
 
 // Re-export public API
 pub use builtin::Builtin;

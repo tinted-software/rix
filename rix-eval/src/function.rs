@@ -43,6 +43,39 @@ pub enum Parameter {
     },
 }
 
+impl std::fmt::Display for Parameter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Parameter::Simple(name) => write!(f, "{}", name),
+            Parameter::Pattern {
+                name,
+                entries,
+                ellipsis,
+            } => {
+                let mut first = true;
+                if let Some(n) = name {
+                    write!(f, "{} @ ", n)?;
+                }
+                write!(f, "{{ ")?;
+                for entry in entries {
+                    if !first {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", entry)?;
+                    first = false;
+                }
+                if *ellipsis {
+                    if !first {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "...")?;
+                }
+                write!(f, " }}")
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Function {
     /// The parameter name (or pattern) that will be bound when the function is applied
@@ -99,7 +132,7 @@ impl Function {
 
     /// Create a curried builtin function (internal constructor)
     pub(crate) fn new_curried_builtin_internal(
-        parameter: String,
+        parameter: Parameter,
         body_text: String,
         closure: VariableScope,
         file_id: Option<FileId>,
@@ -112,8 +145,8 @@ impl Function {
         }
     }
 
-    /// Get the parameter name
-    pub fn parameter(&self) -> &str {
+    /// Get the parameter info
+    pub fn parameter(&self) -> &Parameter {
         &self.parameter
     }
 
@@ -433,7 +466,7 @@ impl Function {
                                     );
 
                                     let next_curried = Function::new_curried_builtin_internal(
-                                        format!("__curried_{}_arg{}", builtin_name, args.len() + 1),
+                                        Parameter::Simple(format!("__curried_{}_arg{}", builtin_name, args.len() + 1)),
                                         format!("__curried_builtin_call:{}", builtin_name),
                                         closure,
                                         file_id,

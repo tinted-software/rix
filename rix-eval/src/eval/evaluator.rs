@@ -162,6 +162,7 @@ impl Evaluator {
         self.register_builtin(Box::new(crate::builtins::HashStringBuiltin));
         self.register_builtin(Box::new(crate::builtins::GroupByBuiltin));
         self.register_builtin(Box::new(crate::builtins::HasContextBuiltin));
+        self.register_builtin(Box::new(crate::builtins::ToXMLBuiltin));
     }
 
     /// Get a builtin function by name

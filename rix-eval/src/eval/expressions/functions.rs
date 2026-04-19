@@ -20,26 +20,35 @@ impl Evaluator {
         scope: &VariableScope,
     ) -> Result<NixValue> {
         // Get the parameter from the lambda
-
-        // In rnix, Lambda has a param() method that returns the parameter pattern
-
         let param = lambda.param().ok_or_else(|| Error::UnsupportedExpression {
             reason: "lambda missing parameter".to_string(),
         })?;
 
-        // Extract the parameter name from the pattern
-
-        // For simple lambdas like `x: ...`, the param is an identifier
-
-        // Try to cast to Ident first, otherwise use the text representation
-
-        let param_name = if let Some(ident) = rix_parser::ast::Ident::cast(param.syntax().clone()) {
-            ident.to_string()
-        } else {
-            // For more complex patterns, use the text representation
-
-            param.syntax().text().to_string().trim().to_string()
+        let parameter = match param {
+            rix_parser::ast::Param::IdentParam(ident_param) => {
+                let name = ident_param
+                    .ident()
+                    .map(|i| i.to_string())
+                    .unwrap_or_default();
+                crate::function::Parameter::Simple(name)
+            }
+            rix_parser::ast::Param::Pattern(pattern) => {
+                let name = pattern.pat_bind().and_then(|b| b.ident()).map(|i| i.to_string());
+                let entries = pattern
+                    .pat_entries()
+                    .filter_map(|e| e.ident())
+                    .map(|i| i.to_string())
+                    .collect();
+                let ellipsis = pattern.ellipsis_token().is_some();
+                crate::function::Parameter::Pattern {
+                    name,
+                    entries,
+                    ellipsis,
+                }
+            }
         };
+
+        // Get the body expression
 
         // Get the body expression
 
@@ -48,10 +57,8 @@ impl Evaluator {
         })?;
 
         // Create a function closure with the current scope
-
         let file_id = self.current_file_id();
-
-        let func = function::Function::new(param_name, &body_expr, scope.clone(), file_id);
+        let func = function::Function::new(parameter, &body_expr, scope.clone(), file_id);
 
         Ok(NixValue::Function(Arc::new(func)))
     }
@@ -4837,7 +4844,7 @@ return Ok(accumulator);
 
                             let curried_func =
                                 crate::function::Function::new_curried_builtin_internal(
-                                    format!("__curried_{}_arg2", builtin_name),
+                                    crate::function::Parameter::Simple(format!("__curried_{}_arg2", builtin_name)),
                                     format!("__curried_builtin_call:{}", builtin_name),
                                     closure,
                                     file_id,
