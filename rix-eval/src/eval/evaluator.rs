@@ -10,10 +10,11 @@ use rix_parser::ast::{Expr, Root};
 use rix_parser::parser::parse;
 use rix_parser::tokenizer::tokenize;
 use rowan::ast::AstNode;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
+const MAX_RECURSION_DEPTH: usize = 1000;
 
 pub struct Evaluator {
     /// Map of builtin function names to their implementations
@@ -35,6 +36,8 @@ pub struct Evaluator {
     /// The top of the stack represents the current evaluation context
     /// Uses interior mutability to allow updating during immutable evaluation
     context_stack: Rc<RefCell<Vec<EvaluationContext>>>,
+    /// Current recursion depth to prevent stack overflows
+    recursion_depth: Cell<usize>,
 }
 
 impl Evaluator {
@@ -47,6 +50,7 @@ impl Evaluator {
             source_map: Rc::new(RefCell::new(Files::new())),
             file_id_to_path: Rc::new(RefCell::new(HashMap::new())),
             context_stack: Rc::new(RefCell::new(Vec::new())),
+            recursion_depth: Cell::new(0),
         };
 
         // Register basic builtin functions
@@ -222,6 +226,22 @@ impl Evaluator {
 
     pub fn register_builtin(&mut self, builtin: Box<dyn Builtin>) {
         self.builtins.insert(builtin.name().to_string(), builtin);
+    }
+
+    pub(crate) fn increment_recursion_depth(&self) -> Result<()> {
+        let depth = self.recursion_depth.get();
+        if depth >= MAX_RECURSION_DEPTH {
+            return Err(Error::RecursionLimitExceeded);
+        }
+        self.recursion_depth.set(depth + 1);
+        Ok(())
+    }
+
+    pub(crate) fn decrement_recursion_depth(&self) {
+        let depth = self.recursion_depth.get();
+        if depth > 0 {
+            self.recursion_depth.set(depth - 1);
+        }
     }
 
     /// Set the variable scope for name resolution
@@ -605,6 +625,17 @@ impl Evaluator {
         expr: &Expr,
         scope: &VariableScope,
     ) -> Result<NixValue> {
+        self.increment_recursion_depth()?;
+        let result = self.evaluate_expr_with_scope_impl_inner(expr, scope);
+        self.decrement_recursion_depth();
+        result
+    }
+
+    fn evaluate_expr_with_scope_impl_inner(
+        &self,
+        expr: &Expr,
+        scope: &VariableScope,
+    ) -> Result<NixValue> {
         match expr {
             Expr::Literal(literal) => self.evaluate_literal(literal),
             Expr::Str(str_expr) => self.evaluate_string(str_expr, scope),
@@ -824,7 +855,8 @@ impl crate::value::NixValue {
         }
 
         // Now recursively force nested structures
-        match value {
+        evaluator.increment_recursion_depth()?;
+        let result = match value {
             NixValue::List(list) => {
                 let mut forced_list = Vec::new();
                 for item in list {
@@ -851,6 +883,8 @@ impl crate::value::NixValue {
                 )
             }
             other => Ok(other),
-        }
+        };
+        evaluator.decrement_recursion_depth();
+        result
     }
 }

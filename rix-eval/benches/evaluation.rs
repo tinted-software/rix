@@ -58,10 +58,10 @@ fn bench_evaluate_complex_expression(c: &mut Criterion) {
     c.bench_function("evaluate_complex_expression", |b| {
         b.iter(|| {
             evaluator.evaluate(black_box(
-                r#"{ 
-                    name = "test"; 
-                    items = [1 2 3 4 5]; 
-                    config = { enabled = true; value = 42; }; 
+                r#"{
+                    name = "test";
+                    items = [1 2 3 4 5];
+                    config = { enabled = true; value = 42; };
                 }"#,
             ))
         })
@@ -73,7 +73,7 @@ fn bench_variable_resolution(c: &mut Criterion) {
     use std::collections::HashMap;
 
     let mut evaluator = Evaluator::new();
-    let mut scope: VariableScope = HashMap::new();
+    let mut scope = VariableScope::new();
     scope.insert("x".to_string(), nix_eval::NixValue::Integer(42));
     scope.insert(
         "y".to_string(),

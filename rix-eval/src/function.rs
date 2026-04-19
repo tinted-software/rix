@@ -31,15 +31,22 @@ use std::sync::Arc;
 /// // A function like `x: x + 1` would be represented as:
 /// // - parameter: "x"
 /// // - body: "x + 1"
-/// // - closure: the scope at function definition time
+/// // Note: In practice, you'd create this from an actual Expr node
 /// ```
+#[derive(Debug, Clone)]
+pub enum Parameter {
+    Simple(String),
+    Pattern {
+        name: Option<String>,
+        entries: Vec<String>,
+        ellipsis: bool,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub struct Function {
     /// The parameter name (or pattern) that will be bound when the function is applied
-    ///
-    /// For simple functions like `x: x + 1`, this is just "x".
-    /// For more complex patterns, this could be an attribute set pattern or list pattern.
-    parameter: String,
+    pub parameter: Parameter,
     /// The body expression (stored as text representation)
     ///
     /// Similar to thunks, we store the expression as text for now.
@@ -72,7 +79,7 @@ impl Function {
     ///
     /// A new function closure
     pub fn new(
-        parameter: String,
+        parameter: Parameter,
         body_expr: &Expr,
         closure: VariableScope,
         file_id: Option<FileId>,
@@ -140,7 +147,7 @@ impl Function {
         // Create a function that captures the first argument
         // When applied, it will call the builtin with (first_arg, new_arg)
         // We'll use a special parameter name to indicate this is a curried builtin
-        let parameter = format!("__curried_{}_arg2", builtin_name);
+        let parameter = Parameter::Simple(format!("__curried_{}_arg2", builtin_name));
         let body_text = format!("__curried_builtin_call:{}", builtin_name);
 
         // Store the builtin and first arg in the closure
@@ -168,7 +175,7 @@ impl Function {
         args: Vec<NixValue>,
         file_id: Option<FileId>,
     ) -> Self {
-        let parameter = format!("__curried_{}_arg{}", builtin_name, args.len() + 1);
+        let parameter = Parameter::Simple(format!("__curried_{}_arg{}", builtin_name, args.len() + 1));
         let _body_text = format!("__curried_builtin_call:{}", builtin_name);
 
         let mut closure = VariableScope::new();
@@ -214,7 +221,7 @@ impl Function {
     pub fn new_curried_foldl(op: NixValue, nul: NixValue, file_id: Option<FileId>) -> Self {
         // Create a function that captures op and nul
         // When applied with a list, it will call foldl' with (op, nul, list)
-        let parameter = "__foldl_list_arg".to_string();
+        let parameter = Parameter::Simple("__foldl_list_arg".to_string());
         let body_text = "__curried_foldl_call".to_string();
 
         // Store op and nul in the closure
@@ -444,7 +451,31 @@ impl Function {
         // Create a new scope that merges the closure with the argument binding
         // The parameter shadows any variable with the same name in the closure
         let mut scope = self.closure.clone();
-        scope.insert(self.parameter.clone(), argument);
+        match &self.parameter {
+            Parameter::Simple(name) => {
+                scope.insert(name.clone(), argument);
+            }
+            Parameter::Pattern {
+                name,
+                entries,
+                ellipsis: _,
+            } => {
+                // If it's a pattern, we need to bind the entries
+                // This is a simplified implementation - in a real evaluator,
+                // we'd need to handle default values and matching correctly.
+                // For now, assume the argument is an attribute set.
+                if let NixValue::AttributeSet(attrs) = argument.clone().force(evaluator)? {
+                    for entry in entries {
+                        if let Some(val) = attrs.get(entry) {
+                            scope.insert(entry.clone(), val.clone());
+                        }
+                    }
+                    if let Some(name) = name {
+                        scope.insert(name.clone(), argument);
+                    }
+                }
+            }
+        }
 
         // Parse the body expression text back into an AST node
         let tokens = tokenize(&self.body_text);

@@ -54,6 +54,10 @@ pub enum Error {
     #[error("infinite recursion detected: thunk is already being evaluated (blackhole)")]
     InfiniteRecursion,
 
+    /// Recursion limit exceeded
+    #[error("recursion limit exceeded: expression is too deeply nested")]
+    RecursionLimitExceeded,
+
     /// IO error occurred during file operations
     #[error("io error: {0}")]
     IoError(#[from] std::io::Error),
