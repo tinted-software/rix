@@ -25,36 +25,42 @@ impl Evaluator {
                 reason: "binary operation missing operator".to_string(),
             })?;
 
-        // Handle `or` operator specially: if left side fails, return right side
-        if op == BinOpKind::Or {
-            // Try to evaluate left side (including forcing)
-            let lhs_result = (|| -> Result<NixValue> {
-                let lhs_raw = self.evaluate_expr_with_scope(&lhs_expr, scope)?;
-                let lhs = lhs_raw.clone().force(self)?;
-                Ok(lhs)
-            })();
+        // Handle logical operators and implication specially for short-circuiting
+        if op == BinOpKind::Or || op == BinOpKind::And || op == BinOpKind::Implication {
+            let lhs_raw = self.evaluate_expr_with_scope(&lhs_expr, scope)?;
+            let lhs = lhs_raw.force(self)?;
+            let lhs_bool = lhs.as_bool()?;
 
-            match lhs_result {
-                Ok(lhs) => {
-                    // Left side succeeded - check if it's falsy
-                    let lhs_falsy = matches!(lhs, NixValue::Boolean(false) | NixValue::Null);
-                    if lhs_falsy {
-                        // Evaluate and return right side
-                        let rhs_raw = self.evaluate_expr_with_scope(&rhs_expr, scope)?;
-                        let rhs = rhs_raw.clone().force(self)?;
-                        Ok(rhs)
+            return match op {
+                BinOpKind::Or => {
+                    if lhs_bool {
+                        Ok(NixValue::Boolean(true))
                     } else {
-                        // Short-circuit: return left side
-                        Ok(lhs)
+                        let rhs_raw = self.evaluate_expr_with_scope(&rhs_expr, scope)?;
+                        let rhs = rhs_raw.force(self)?;
+                        Ok(NixValue::Boolean(rhs.as_bool()?))
                     }
                 }
-                Err(_) => {
-                    // Left side failed (either evaluation or forcing) - return right side
-                    let rhs_raw = self.evaluate_expr_with_scope(&rhs_expr, scope)?;
-                    let rhs = rhs_raw.clone().force(self)?;
-                    Ok(rhs)
+                BinOpKind::And => {
+                    if !lhs_bool {
+                        Ok(NixValue::Boolean(false))
+                    } else {
+                        let rhs_raw = self.evaluate_expr_with_scope(&rhs_expr, scope)?;
+                        let rhs = rhs_raw.force(self)?;
+                        Ok(NixValue::Boolean(rhs.as_bool()?))
+                    }
                 }
-            }
+                BinOpKind::Implication => {
+                    if !lhs_bool {
+                        Ok(NixValue::Boolean(true))
+                    } else {
+                        let rhs_raw = self.evaluate_expr_with_scope(&rhs_expr, scope)?;
+                        let rhs = rhs_raw.force(self)?;
+                        Ok(NixValue::Boolean(rhs.as_bool()?))
+                    }
+                }
+                _ => unreachable!(),
+            };
         } else {
             // For all other operators, evaluate both operands first
             let lhs_raw = self.evaluate_expr_with_scope(&lhs_expr, scope)?;
@@ -72,13 +78,46 @@ impl Evaluator {
                 BinOpKind::Add => self.evaluate_add(&lhs, &rhs),
                 BinOpKind::Sub => self.evaluate_subtract(&lhs, &rhs),
                 BinOpKind::Mul => self.evaluate_multiply(&lhs, &rhs),
-                BinOpKind::Div => self.evaluate_divide(&lhs, &rhs),
-                BinOpKind::Update => {
-                    // `//` operator: Check if operands are integers (integer division) or attribute sets (update)
-                    match (&lhs, &rhs) {
-                        (NixValue::Integer(_), NixValue::Integer(_)) => {
-                            self.evaluate_integer_divide(&lhs, &rhs)
+                BinOpKind::Div => match (&lhs, &rhs) {
+                    (NixValue::Integer(a), NixValue::Integer(b)) => {
+                        if *b == 0 {
+                            return Err(Error::UnsupportedExpression {
+                                reason: "division by zero".to_string(),
+                            });
                         }
+                        Ok(NixValue::Integer(a / b))
+                    }
+                    (NixValue::Float(a), NixValue::Float(b)) => {
+                        if *b == 0.0 {
+                            return Err(Error::UnsupportedExpression {
+                                reason: "division by zero".to_string(),
+                            });
+                        }
+                        Ok(NixValue::Float(a / b))
+                    }
+                    (NixValue::Integer(a), NixValue::Float(b)) => {
+                        if *b == 0.0 {
+                            return Err(Error::UnsupportedExpression {
+                                reason: "division by zero".to_string(),
+                            });
+                        }
+                        Ok(NixValue::Float(*a as f64 / b))
+                    }
+                    (NixValue::Float(a), NixValue::Integer(b)) => {
+                        if *b == 0 {
+                            return Err(Error::UnsupportedExpression {
+                                reason: "division by zero".to_string(),
+                            });
+                        }
+                        Ok(NixValue::Float(a / *b as f64))
+                    }
+                    _ => Err(Error::UnsupportedExpression {
+                        reason: format!("cannot divide {} by {}", lhs, rhs),
+                    }),
+                },
+                BinOpKind::Update => {
+                    // `//` operator is ONLY for attribute set updates in Nix
+                    match (&lhs, &rhs) {
                         (NixValue::AttributeSet(lhs_attrs), NixValue::AttributeSet(rhs_attrs)) => {
                             // Attribute set update: merge rhs into lhs, with rhs values taking precedence
                             let mut result = lhs_attrs.clone();
@@ -100,9 +139,6 @@ impl Evaluator {
                 BinOpKind::More => self.evaluate_greater(&lhs, &rhs),
                 BinOpKind::LessOrEq => self.evaluate_less_or_equal(&lhs, &rhs),
                 BinOpKind::MoreOrEq => self.evaluate_greater_or_equal(&lhs, &rhs),
-                // Logical operators
-                BinOpKind::And => self.evaluate_and(&lhs, &rhs),
-                BinOpKind::Or => self.evaluate_or(&lhs, &rhs),
                 // List concatenation operator
                 BinOpKind::Concat => self.evaluate_concat(&lhs, &rhs),
                 _ => Err(Error::UnsupportedExpression {
@@ -124,9 +160,12 @@ impl Evaluator {
         unary_op: &UnaryOp,
         scope: &VariableScope,
     ) -> Result<NixValue> {
-        // Get the operator text from the syntax node
-        // The operator token is part of the syntax tree
-        let op_text = unary_op.syntax().text().to_string();
+        // Get the operator kind from the parser
+        let op = unary_op
+            .operator()
+            .ok_or_else(|| Error::UnsupportedExpression {
+                reason: "unary operation missing operator".to_string(),
+            })?;
 
         // Get the operand expression
         let operand_expr = unary_op
@@ -141,24 +180,28 @@ impl Evaluator {
         // Force thunks before applying unary operators
         let operand = operand_value.clone().force(self)?;
 
-        // Apply the unary operator based on the text
-        // The operator text will be "-" for unary minus
-        if op_text.starts_with('-') {
-            // Unary minus: negate the value
-            match operand {
-                NixValue::Integer(n) => Ok(NixValue::Integer(-n)),
-                NixValue::Float(f) => Ok(NixValue::Float(-f)),
-                _ => Err(Error::UnsupportedExpression {
-                    reason: format!("cannot apply unary minus to {}", operand),
-                }),
+        // Apply the unary operator
+        match op {
+            rix_parser::ast::UnaryOpKind::Negate => {
+                // Unary minus: negate the value
+                match operand {
+                    NixValue::Integer(n) => Ok(NixValue::Integer(-n)),
+                    NixValue::Float(f) => Ok(NixValue::Float(-f)),
+                    _ => Err(Error::UnsupportedExpression {
+                        reason: format!("cannot apply unary minus to {}", operand),
+                    }),
+                }
             }
-        } else if op_text.starts_with('+') {
-            // Unary plus: no-op (just return the value)
-            Ok(operand)
-        } else {
-            Err(Error::UnsupportedExpression {
-                reason: format!("unsupported unary operator: {}", op_text),
-            })
+            rix_parser::ast::UnaryOpKind::Invert => {
+                // Logical NOT (!)
+                match operand {
+                    NixValue::Boolean(b) => Ok(NixValue::Boolean(!b)),
+                    NixValue::Null => Ok(NixValue::Boolean(true)), // !null is true in Nix
+                    _ => Err(Error::UnsupportedExpression {
+                        reason: format!("cannot apply logical NOT to {}", operand),
+                    }),
+                }
+            }
         }
     }
 
@@ -380,46 +423,6 @@ impl Evaluator {
     /// Evaluate division operation
     ///
     /// In Nix, `/` is used for:
-
-    pub(crate) fn evaluate_divide(&self, lhs: &NixValue, rhs: &NixValue) -> Result<NixValue> {
-        match (lhs, rhs) {
-            (NixValue::Integer(a), NixValue::Integer(b)) => {
-                if *b == 0 {
-                    return Err(Error::UnsupportedExpression {
-                        reason: "division by zero".to_string(),
-                    });
-                }
-                Ok(NixValue::Float(*a as f64 / *b as f64))
-            }
-            (NixValue::Float(a), NixValue::Float(b)) => {
-                if *b == 0.0 {
-                    return Err(Error::UnsupportedExpression {
-                        reason: "division by zero".to_string(),
-                    });
-                }
-                Ok(NixValue::Float(a / b))
-            }
-            (NixValue::Integer(a), NixValue::Float(b)) => {
-                if *b == 0.0 {
-                    return Err(Error::UnsupportedExpression {
-                        reason: "division by zero".to_string(),
-                    });
-                }
-                Ok(NixValue::Float(*a as f64 / b))
-            }
-            (NixValue::Float(a), NixValue::Integer(b)) => {
-                if *b == 0 {
-                    return Err(Error::UnsupportedExpression {
-                        reason: "division by zero".to_string(),
-                    });
-                }
-                Ok(NixValue::Float(a / *b as f64))
-            }
-            _ => Err(Error::UnsupportedExpression {
-                reason: format!("cannot divide {} by {}", lhs, rhs),
-            }),
-        }
-    }
 
     /// Evaluate a parenthesized expression
     ///
@@ -708,33 +711,6 @@ impl Evaluator {
             }
             _ => Err(Error::UnsupportedExpression {
                 reason: format!("cannot concatenate {} and {} with ++", lhs, rhs),
-            }),
-        }
-    }
-
-    /// Import and evaluate a Nix file
-    ///
-    /// This method loads a .nix file, parses it, and evaluates it.
-    /// Results are cached to avoid re-evaluating the same file multiple times.
-    ///
-    /// In Nix, importing a directory automatically looks for `default.nix` in that directory.
-
-    pub(crate) fn evaluate_integer_divide(
-        &self,
-        lhs: &NixValue,
-        rhs: &NixValue,
-    ) -> Result<NixValue> {
-        match (lhs, rhs) {
-            (NixValue::Integer(a), NixValue::Integer(b)) => {
-                if *b == 0 {
-                    return Err(Error::UnsupportedExpression {
-                        reason: "integer division by zero".to_string(),
-                    });
-                }
-                Ok(NixValue::Integer(a / b))
-            }
-            _ => Err(Error::UnsupportedExpression {
-                reason: format!("cannot perform integer division on {} and {}", lhs, rhs),
             }),
         }
     }

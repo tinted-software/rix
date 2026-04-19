@@ -52,7 +52,11 @@ fn main() {
             println!("{:line_len$} {}", i + 1, line, line_len = line_len);
             if i >= start_row && i <= end_row {
                 print!("{:line_len$} ", "", line_len = line_len);
-                let mut end_col = if i == end_row { end_col } else { line.chars().count() };
+                let mut end_col = if i == end_row {
+                    end_col
+                } else {
+                    line.chars().count()
+                };
                 if i == start_row {
                     print!("{:indent$}", "", indent = start_col);
                     end_col -= start_col;

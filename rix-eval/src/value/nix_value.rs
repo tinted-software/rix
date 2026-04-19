@@ -132,6 +132,9 @@ pub enum NixValue {
     /// evaluated with the argument bound to the function parameter.
     #[serde(skip)]
     Function(Arc<function::Function>),
+    /// A builtin function provided by the evaluator
+    #[serde(skip)]
+    Builtin(String),
     /// Path value (file system path)
     ///
     /// Path literals like `./file.nix` or `/absolute/path` represent file system paths.

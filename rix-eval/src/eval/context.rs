@@ -14,30 +14,44 @@ use std::sync::{Arc, Mutex};
 /// - Lexical variables take precedence.
 /// - 'with' expressions provide a lazy fallback stack.
 /// - 'rec' and 'let' bindings provide a shared recursive scope.
+/// Represents a single layer in the variable scope stack
+#[derive(Debug, Clone)]
+pub enum ScopeLayer {
+    /// Regular lexical variables (e.g. from function arguments)
+    Lexical(HashMap<String, NixValue>),
+    /// Shared recursive variables (e.g. from 'rec' or 'let')
+    Recursive(Arc<Mutex<HashMap<String, NixValue>>>),
+}
+
+/// Represents a variable scope for name resolution
+///
+/// A scope consists of a stack of layers (lexical or recursive) and a stack
+/// of 'with' attribute sets. Name resolution follows the stack from top to bottom.
 #[derive(Debug, Clone)]
 pub struct VariableScope {
-    /// Lexical variables (e.g. from 'let', function arguments)
-    vars: HashMap<String, NixValue>,
+    /// Stack of scope layers (lexical and recursive)
+    layers: Vec<ScopeLayer>,
     /// Stack of 'with' attribute sets (lazy fallback)
-    /// We use NixValue::Thunk to keep them lazy.
     withs: Vec<NixValue>,
-    /// Shared recursive scopes (used by 'rec' and 'let' for mutual recursion)
-    recursive: Vec<Arc<Mutex<HashMap<String, NixValue>>>>,
 }
 
 impl VariableScope {
     /// Create a new empty scope
     pub fn new() -> Self {
         Self {
-            vars: HashMap::new(),
+            layers: vec![ScopeLayer::Lexical(HashMap::new())],
             withs: Vec::new(),
-            recursive: Vec::new(),
         }
     }
 
     /// Add a shared recursive map to this scope
     pub fn push_recursive(&mut self, rec: Arc<Mutex<HashMap<String, NixValue>>>) {
-        self.recursive.push(rec);
+        self.layers.push(ScopeLayer::Recursive(rec));
+    }
+
+    /// Add a new lexical layer to this scope
+    pub fn push_lexical(&mut self) {
+        self.layers.push(ScopeLayer::Lexical(HashMap::new()));
     }
 
     /// Add a 'with' attribute set to the stack
@@ -47,40 +61,46 @@ impl VariableScope {
 
     /// Look up a variable in the scope according to Nix rules
     ///
-    /// NOTE: This only checks lexical and recursive variables.
-    /// 'with' lookup requires an Evaluator and is handled in evaluator.rs.
+    /// Checks layers from innermost to outermost.
     pub fn get(&self, name: &str) -> Option<NixValue> {
-        // 1. Check recursive shared scopes (for mutual recursion)
-        // Check from inner to outer. These shadow lexical variables from outer scopes.
-        for rec in self.recursive.iter().rev() {
-            if let Ok(map) = rec.lock() {
-                if let Some(v) = map.get(name) {
-                    return Some(v.clone());
+        for layer in self.layers.iter().rev() {
+            match layer {
+                ScopeLayer::Lexical(vars) => {
+                    if let Some(v) = vars.get(name) {
+                        return Some(v.clone());
+                    }
+                }
+                ScopeLayer::Recursive(mutex) => {
+                    if let Ok(map) = mutex.lock() {
+                        if let Some(v) = map.get(name) {
+                            return Some(v.clone());
+                        }
+                    }
                 }
             }
         }
-
-        // 2. Check lexical variables (including parents)
-        if let Some(v) = self.vars.get(name) {
-            return Some(v.clone());
-        }
-
         None
     }
 
-    /// Insert a lexical variable
+    /// Insert a lexical variable into the current (innermost) layer
     pub fn insert(&mut self, name: String, value: NixValue) {
-        self.vars.insert(name, value);
+        // Find the topmost lexical layer, or create one if none exists
+        if let Some(ScopeLayer::Lexical(vars)) = self.layers.last_mut() {
+            vars.insert(name, value);
+        } else {
+            let mut vars = HashMap::new();
+            vars.insert(name, value);
+            self.layers.push(ScopeLayer::Lexical(vars));
+        }
     }
 
-    /// Get reference to lexical variables
-    pub fn vars(&self) -> &HashMap<String, NixValue> {
-        &self.vars
-    }
-
-    /// Get mutable reference to lexical variables (for compatibility)
-    pub fn vars_mut(&mut self) -> &mut HashMap<String, NixValue> {
-        &mut self.vars
+    /// Get all lexical variables in the current layer
+    pub fn current_vars(&self) -> Option<&HashMap<String, NixValue>> {
+        if let Some(ScopeLayer::Lexical(vars)) = self.layers.last() {
+            Some(vars)
+        } else {
+            None
+        }
     }
 
     /// Get with stack
@@ -88,19 +108,19 @@ impl VariableScope {
         &self.withs
     }
 
-    /// Remove a variable
-    pub fn remove(&mut self, name: &str) -> Option<NixValue> {
-        self.vars.remove(name)
+    /// Length of the scope stack
+    pub fn depth(&self) -> usize {
+        self.layers.len()
     }
 
-    /// Length of lexical variables
-    pub fn len(&self) -> usize {
-        self.vars.len()
-    }
-
-    /// check if empty
+    /// Check if empty
     pub fn is_empty(&self) -> bool {
-        self.vars.is_empty()
+        self.layers.is_empty()
+            || (self.layers.len() == 1
+                && match &self.layers[0] {
+                    ScopeLayer::Lexical(vars) => vars.is_empty(),
+                    _ => false,
+                })
     }
 }
 
@@ -113,9 +133,8 @@ impl Default for VariableScope {
 impl From<HashMap<String, NixValue>> for VariableScope {
     fn from(vars: HashMap<String, NixValue>) -> Self {
         Self {
-            vars,
+            layers: vec![ScopeLayer::Lexical(vars)],
             withs: Vec::new(),
-            recursive: Vec::new(),
         }
     }
 }

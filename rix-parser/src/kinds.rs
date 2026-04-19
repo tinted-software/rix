@@ -249,9 +249,15 @@ mod tests {
 
     #[test]
     fn from_str_valid() {
-        assert_eq!(SyntaxKind::from_str("TOKEN_COMMENT").unwrap(), TOKEN_COMMENT);
+        assert_eq!(
+            SyntaxKind::from_str("TOKEN_COMMENT").unwrap(),
+            TOKEN_COMMENT
+        );
         assert_eq!(SyntaxKind::from_str("NODE_ROOT").unwrap(), NODE_ROOT);
-        assert_eq!(SyntaxKind::from_str("NODE_HAS_ATTR").unwrap(), NODE_HAS_ATTR);
+        assert_eq!(
+            SyntaxKind::from_str("NODE_HAS_ATTR").unwrap(),
+            NODE_HAS_ATTR
+        );
     }
 
     #[test]

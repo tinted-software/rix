@@ -125,8 +125,10 @@ impl Evaluator {
         self.register_builtin(Box::new(ElemAtBuiltin));
         self.register_builtin(Box::new(SubstringBuiltin));
         self.register_builtin(Box::new(ReplaceStringsBuiltin));
+        self.register_builtin(Box::new(MatchBuiltin));
         self.register_builtin(Box::new(SplitBuiltin));
         self.register_builtin(Box::new(SplitVersionBuiltin));
+        self.register_builtin(Box::new(crate::builtins::ImportBuiltin));
         self.register_builtin(Box::new(crate::builtins::DerivationBuiltin));
         self.register_builtin(Box::new(crate::builtins::StorePathBuiltin));
         self.register_builtin(Box::new(crate::builtins::PathBuiltin));
@@ -163,6 +165,7 @@ impl Evaluator {
         self.register_builtin(Box::new(crate::builtins::GroupByBuiltin));
         self.register_builtin(Box::new(crate::builtins::HasContextBuiltin));
         self.register_builtin(Box::new(crate::builtins::ToXMLBuiltin));
+        self.register_builtin(Box::new(crate::builtins::FunctionArgsBuiltin));
     }
 
     /// Get a builtin function by name
@@ -360,6 +363,20 @@ impl Evaluator {
             .and_then(|file_id| file_id_to_path.get(&file_id).cloned())
     }
 
+    /// Resolve a path relative to the current file being evaluated
+    pub fn resolve_path(&self, p: &std::path::Path) -> PathBuf {
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else if let Some(current) = self.current_file_path() {
+            current
+                .parent()
+                .map(|parent| parent.join(p))
+                .unwrap_or_else(|| p.to_path_buf())
+        } else {
+            p.to_path_buf()
+        }
+    }
+
     pub(crate) fn current_file_id(&self) -> Option<FileId> {
         self.context_stack
             .borrow()
@@ -515,16 +532,21 @@ impl Evaluator {
     /// * `Ok(NixValue)` - The evaluated value
     /// * `Err(Error)` - An error if reading, parsing, or evaluation fails
     pub fn evaluate_from_file(&self, file_path: &PathBuf) -> Result<NixValue> {
+        let mut actual_path = file_path.clone();
+        if actual_path.is_dir() {
+            actual_path = actual_path.join("default.nix");
+        }
+
         // Read the file
         let code =
-            std::fs::read_to_string(file_path).map_err(|e| Error::UnsupportedExpression {
-                reason: format!("cannot read file '{}': {}", file_path.display(), e),
+            std::fs::read_to_string(&actual_path).map_err(|e| Error::UnsupportedExpression {
+                reason: format!("cannot read file '{}': {}", actual_path.display(), e),
             })?;
 
         // Get canonical path
-        let canonical_path = file_path
+        let canonical_path = actual_path
             .canonicalize()
-            .unwrap_or_else(|_| file_path.clone());
+            .unwrap_or_else(|_| actual_path.clone());
 
         // Add file to source map and get file ID
         let file_id = {
@@ -690,13 +712,18 @@ impl Evaluator {
             "true" => Ok(NixValue::Boolean(true)),
             "false" => Ok(NixValue::Boolean(false)),
             "null" => Ok(NixValue::Null),
+            "import" => {
+                if self.builtins.contains_key("import") {
+                    return Ok(NixValue::Builtin("import".to_string()));
+                }
+                Err(Error::UnsupportedExpression {
+                    reason: "import builtin not registered".to_string(),
+                })
+            }
             "builtins" => {
                 let mut builtins_attrs = HashMap::new();
                 for (name, _builtin) in &self.builtins {
-                    builtins_attrs.insert(
-                        name.clone(),
-                        NixValue::String(format!("__builtin_func:{}", name)),
-                    );
+                    builtins_attrs.insert(name.clone(), NixValue::Builtin(name.clone()));
                 }
                 builtins_attrs.insert(
                     "currentSystem".to_string(),
@@ -711,23 +738,7 @@ impl Evaluator {
             _ => {
                 // Check if it's a global builtin (like map, all, filter)
                 if self.builtins.contains_key(text) {
-                    if text == "map"
-                        || text == "all"
-                        || text == "any"
-                        || text == "filter"
-                        || text == "concatMap"
-                        || text == "catAttrs"
-                        || text == "attrValues"
-                        || text == "tryEval"
-                    {
-                        return Ok(NixValue::String(format!("__direct_builtin:{}", text)));
-                    }
-                    return Err(Error::UnsupportedExpression {
-                        reason: format!(
-                            "builtin '{}' cannot be used as a value, it must be called",
-                            text
-                        ),
-                    });
+                    return Ok(NixValue::Builtin(text.to_string()));
                 }
                 Err(Error::UnsupportedExpression {
                     reason: format!("unknown identifier: {}", text),
@@ -739,6 +750,66 @@ impl Evaluator {
 
 // NixValue force methods (moved here to avoid circular dependencies)
 impl crate::value::NixValue {
+    /// Apply this value as a function to an argument
+    pub fn apply(self, evaluator: &crate::eval::Evaluator, argument: NixValue) -> Result<NixValue> {
+        let func_forced = self.force(evaluator)?;
+        match func_forced {
+            NixValue::Function(func) => func.apply(evaluator, argument),
+            NixValue::Builtin(name) => {
+                let builtin_name = name;
+                if let Some(builtin) = evaluator.builtins.get(&builtin_name) {
+                    match builtin.call_with_evaluator(&[argument.clone()], evaluator) {
+                        Ok(res) => Ok(res),
+                        Err(Error::UnsupportedExpression { reason })
+                            if reason.contains("takes") && reason.contains("arguments") =>
+                        {
+                            // Trigger currying
+                            let mut closure = crate::eval::context::VariableScope::new();
+                            closure.insert(
+                                format!("__builtin_{}", builtin_name),
+                                NixValue::Builtin(builtin_name.clone()),
+                            );
+                            closure.insert("__curried_first_arg".to_string(), argument);
+
+                            let curried = crate::function::Function::new_curried_builtin_internal(
+                                crate::function::Parameter::Simple(format!(
+                                    "__curried_{}_arg2",
+                                    builtin_name
+                                )),
+                                format!("__curried_builtin_call:{}", builtin_name),
+                                closure,
+                                evaluator.current_file_id(),
+                            );
+                            Ok(NixValue::Function(std::sync::Arc::new(curried)))
+                        }
+                        Err(e) => Err(e),
+                    }
+                } else {
+                    Err(Error::UnsupportedExpression {
+                        reason: format!("unknown builtin: {}", builtin_name),
+                    })
+                }
+            }
+            NixValue::AttributeSet(ref attrs) => {
+                // Check for __functor
+                if let Some(functor) = attrs.get("__functor") {
+                    let functor_forced = functor.clone().force(evaluator)?;
+                    // Nix __functor calls are: functor self arg
+                    let self_val = NixValue::AttributeSet(attrs.clone());
+                    let partially_applied = functor_forced.apply(evaluator, self_val)?;
+                    partially_applied.apply(evaluator, argument)
+                } else {
+                    Err(Error::UnsupportedExpression {
+                        reason: format!("cannot apply non-function value: {}", func_forced),
+                    })
+                }
+            }
+            _ => Err(Error::UnsupportedExpression {
+                reason: format!("cannot apply non-function value: {}", func_forced),
+            }),
+        }
+    }
+
     /// Force evaluation of this value if it's a thunk
     ///
     /// If this value is a thunk, it will be evaluated and the result returned.

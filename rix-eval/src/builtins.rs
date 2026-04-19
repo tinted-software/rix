@@ -3,6 +3,7 @@
 //! This module provides implementations of Nix builtin functions that can be
 //! registered with the evaluator.
 
+use crate::VariableScope;
 use crate::builtin::Builtin;
 use crate::error::{Error, Result};
 use crate::eval::Evaluator;
@@ -22,31 +23,32 @@ impl Builtin for ImportBuiltin {
         "import"
     }
 
-    fn call(&self, args: &[NixValue]) -> Result<NixValue> {
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
         if args.len() != 1 {
             return Err(Error::UnsupportedExpression {
                 reason: format!("import takes 1 argument, got {}", args.len()),
             });
         }
 
-        match &args[0] {
-            NixValue::Path(_path) => {
-                // Import the file - this will be handled by the evaluator's import_file method
-                // For now, return an error indicating this needs evaluator context
-                Err(Error::UnsupportedExpression {
-                    reason: "import builtin requires evaluator context".to_string(),
-                })
+        let forced = args[0].clone().force(evaluator)?;
+        let path = match forced {
+            NixValue::Path(p) => p,
+            NixValue::StorePath(p) => std::path::PathBuf::from(p),
+            NixValue::String(s) => std::path::PathBuf::from(s),
+            _ => {
+                return Err(Error::UnsupportedExpression {
+                    reason: format!("import expects a path, got {}", forced),
+                });
             }
-            NixValue::StorePath(_path) => {
-                // Same for store paths
-                Err(Error::UnsupportedExpression {
-                    reason: "import builtin requires evaluator context".to_string(),
-                })
-            }
-            _ => Err(Error::UnsupportedExpression {
-                reason: format!("import expects a path, got {}", args[0]),
-            }),
-        }
+        };
+
+        evaluator.evaluate_from_file(&path)
+    }
+
+    fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
+        Err(Error::UnsupportedExpression {
+            reason: "import requires evaluator context".to_string(),
+        })
     }
 }
 
@@ -67,7 +69,9 @@ impl Builtin for IsNullBuiltin {
     }
 
     fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
-        Err(Error::UnsupportedExpression { reason: "isNull requires evaluator context".to_string() })
+        Err(Error::UnsupportedExpression {
+            reason: "isNull requires evaluator context".to_string(),
+        })
     }
 }
 
@@ -87,7 +91,9 @@ impl Builtin for IsBoolBuiltin {
     }
 
     fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
-        Err(Error::UnsupportedExpression { reason: "isBool requires evaluator context".to_string() })
+        Err(Error::UnsupportedExpression {
+            reason: "isBool requires evaluator context".to_string(),
+        })
     }
 }
 
@@ -107,7 +113,9 @@ impl Builtin for IsIntBuiltin {
     }
 
     fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
-        Err(Error::UnsupportedExpression { reason: "isInt requires evaluator context".to_string() })
+        Err(Error::UnsupportedExpression {
+            reason: "isInt requires evaluator context".to_string(),
+        })
     }
 }
 
@@ -127,7 +135,9 @@ impl Builtin for IsFloatBuiltin {
     }
 
     fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
-        Err(Error::UnsupportedExpression { reason: "isFloat requires evaluator context".to_string() })
+        Err(Error::UnsupportedExpression {
+            reason: "isFloat requires evaluator context".to_string(),
+        })
     }
 }
 
@@ -147,7 +157,9 @@ impl Builtin for IsStringBuiltin {
     }
 
     fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
-        Err(Error::UnsupportedExpression { reason: "isString requires evaluator context".to_string() })
+        Err(Error::UnsupportedExpression {
+            reason: "isString requires evaluator context".to_string(),
+        })
     }
 }
 
@@ -170,7 +182,9 @@ impl Builtin for IsPathBuiltin {
     }
 
     fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
-        Err(Error::UnsupportedExpression { reason: "isPath requires evaluator context".to_string() })
+        Err(Error::UnsupportedExpression {
+            reason: "isPath requires evaluator context".to_string(),
+        })
     }
 }
 
@@ -190,7 +204,9 @@ impl Builtin for IsListBuiltin {
     }
 
     fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
-        Err(Error::UnsupportedExpression { reason: "isList requires evaluator context".to_string() })
+        Err(Error::UnsupportedExpression {
+            reason: "isList requires evaluator context".to_string(),
+        })
     }
 }
 
@@ -213,7 +229,9 @@ impl Builtin for IsAttrsBuiltin {
     }
 
     fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
-        Err(Error::UnsupportedExpression { reason: "isAttrs requires evaluator context".to_string() })
+        Err(Error::UnsupportedExpression {
+            reason: "isAttrs requires evaluator context".to_string(),
+        })
     }
 }
 
@@ -234,7 +252,9 @@ impl Builtin for IsFunctionBuiltin {
     }
 
     fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
-        Err(Error::UnsupportedExpression { reason: "isFunction requires evaluator context".to_string() })
+        Err(Error::UnsupportedExpression {
+            reason: "isFunction requires evaluator context".to_string(),
+        })
     }
 }
 
@@ -244,21 +264,29 @@ impl Builtin for StringLengthBuiltin {
     fn name(&self) -> &str {
         "stringLength"
     }
-    fn call(&self, args: &[NixValue]) -> Result<NixValue> {
+
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
         if args.len() != 1 {
             return Err(Error::UnsupportedExpression {
                 reason: format!("stringLength takes 1 argument, got {}", args.len()),
             });
         }
-        let len = match &args[0] {
+        let forced = args[0].clone().force(evaluator)?;
+        let len = match forced {
             NixValue::String(s) => s.len(),
             _ => {
                 return Err(Error::UnsupportedExpression {
-                    reason: format!("stringLength expects a string, got {}", args[0]),
+                    reason: format!("stringLength expects a string, got {}", forced),
                 });
             }
         };
         Ok(NixValue::Integer(len as i64))
+    }
+
+    fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
+        Err(Error::UnsupportedExpression {
+            reason: "stringLength requires evaluator context".to_string(),
+        })
     }
 }
 
@@ -293,19 +321,43 @@ impl Builtin for SeqBuiltin {
 }
 
 /// Elem builtin - checks if an element is in a list
-///
-/// `builtins.elem x xs` returns true if `x` is an element of list `xs`.
-/// Note: This requires evaluator context to force thunks in the list.
 pub struct ElemBuiltin;
 impl Builtin for ElemBuiltin {
     fn name(&self) -> &str {
         "elem"
     }
+
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
+        if args.len() != 2 {
+            return Err(Error::UnsupportedExpression {
+                reason: format!("elem takes 2 arguments, got {}", args.len()),
+            });
+        }
+
+        let x = args[0].clone().force(evaluator)?;
+        let xs_val = args[1].clone().force(evaluator)?;
+        let xs = match xs_val {
+            NixValue::List(l) => l,
+            _ => {
+                return Err(Error::UnsupportedExpression {
+                    reason: format!("elem: second argument must be a list, got {}", xs_val),
+                });
+            }
+        };
+
+        for item in xs {
+            let item_forced = item.force(evaluator)?;
+            if evaluator.evaluate_equal(&x, &item_forced)? == NixValue::Boolean(true) {
+                return Ok(NixValue::Boolean(true));
+            }
+        }
+
+        Ok(NixValue::Boolean(false))
+    }
+
     fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
-        // elem requires evaluator context to force thunks in the list
-        // It's handled specially in evaluate_apply
         Err(Error::UnsupportedExpression {
-            reason: "elem requires evaluator context and must be handled specially".to_string(),
+            reason: "elem requires evaluator context".to_string(),
         })
     }
 }
@@ -314,35 +366,60 @@ impl Builtin for ElemBuiltin {
 ///
 /// `builtins.intersectAttrs e1 e2` returns an attribute set containing only the attributes
 /// that are present in both `e1` and `e2`, with values from `e2`.
+/// IntersectAttrs builtin - returns the intersection of two attribute sets
 pub struct IntersectAttrsBuiltin;
 impl Builtin for IntersectAttrsBuiltin {
     fn name(&self) -> &str {
         "intersectAttrs"
     }
-    fn call(&self, args: &[NixValue]) -> Result<NixValue> {
+
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
         if args.len() != 2 {
             return Err(Error::UnsupportedExpression {
                 reason: format!("intersectAttrs takes 2 arguments, got {}", args.len()),
             });
         }
-        match (&args[0], &args[1]) {
-            (NixValue::AttributeSet(e1), NixValue::AttributeSet(e2)) => {
-                let mut result = HashMap::new();
-                // Only include attributes that exist in both sets, with values from e2
-                for (key, value) in e2 {
-                    if e1.contains_key(key) {
-                        result.insert(key.clone(), value.clone());
-                    }
-                }
-                Ok(NixValue::AttributeSet(result))
+
+        let e1_val = args[0].clone().force(evaluator)?;
+        let e1 = match e1_val {
+            NixValue::AttributeSet(a) => a,
+            _ => {
+                return Err(Error::UnsupportedExpression {
+                    reason: format!(
+                        "intersectAttrs: first argument must be an attribute set, got {}",
+                        e1_val
+                    ),
+                });
             }
-            _ => Err(Error::UnsupportedExpression {
-                reason: format!(
-                    "intersectAttrs: both arguments must be attribute sets, got {} and {}",
-                    args[0], args[1]
-                ),
-            }),
+        };
+
+        let e2_val = args[1].clone().force(evaluator)?;
+        let e2 = match e2_val {
+            NixValue::AttributeSet(a) => a,
+            _ => {
+                return Err(Error::UnsupportedExpression {
+                    reason: format!(
+                        "intersectAttrs: second argument must be an attribute set, got {}",
+                        e2_val
+                    ),
+                });
+            }
+        };
+
+        let mut result = HashMap::new();
+        for (key, value) in e2 {
+            if e1.contains_key(&key) {
+                result.insert(key, value);
+            }
         }
+
+        Ok(NixValue::AttributeSet(result))
+    }
+
+    fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
+        Err(Error::UnsupportedExpression {
+            reason: "intersectAttrs requires evaluator context".to_string(),
+        })
     }
 }
 
@@ -407,30 +484,34 @@ impl Builtin for TypeOfBuiltin {
     fn name(&self) -> &str {
         "typeOf"
     }
-    fn call(&self, args: &[NixValue]) -> Result<NixValue> {
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
         if args.len() != 1 {
             return Err(Error::UnsupportedExpression {
                 reason: format!("typeOf takes 1 argument, got {}", args.len()),
             });
         }
-        let type_name = match &args[0] {
+        let forced = args[0].clone().force(evaluator)?;
+        let type_name = match forced {
             NixValue::Integer(_) => "int",
             NixValue::Float(_) => "float",
             NixValue::Boolean(_) => "bool",
-            NixValue::String(s) if s.starts_with("__builtin_func:") => "lambda",
+            NixValue::Builtin(_) => "lambda",
             NixValue::String(_) => "string",
             NixValue::Null => "null",
             NixValue::List(_) => "list",
             NixValue::AttributeSet(_) => "set",
             NixValue::Path(_) => "path",
             NixValue::StorePath(_) => "path",
-            NixValue::Derivation(_) => "lambda", // Derivations are callable in Nix
-            NixValue::Thunk(_) => "thunk",
             NixValue::Function(_) => "lambda",
-            NixValue::DeferredLookup(_, _) => "thunk",
-            NixValue::DeferredInherit(_, _) => "thunk",
+            NixValue::Derivation(_) => "set",
+            _ => "thunk", // Should be unreachable after force
         };
         Ok(NixValue::String(type_name.to_string()))
+    }
+    fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
+        Err(Error::UnsupportedExpression {
+            reason: "typeOf requires evaluator context".to_string(),
+        })
     }
 }
 
@@ -440,13 +521,14 @@ impl Builtin for ToStringBuiltin {
     fn name(&self) -> &str {
         "toString"
     }
-    fn call(&self, args: &[NixValue]) -> Result<NixValue> {
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
         if args.len() != 1 {
             return Err(Error::UnsupportedExpression {
                 reason: format!("toString takes 1 argument, got {}", args.len()),
             });
         }
-        let str_value = match &args[0] {
+        let forced = args[0].clone().force(evaluator)?;
+        let str_value = match forced {
             NixValue::String(s) => s.clone(),
             NixValue::Integer(i) => i.to_string(),
             NixValue::Float(f) => f.to_string(),
@@ -455,16 +537,19 @@ impl Builtin for ToStringBuiltin {
             NixValue::Path(p) => p.display().to_string(),
             NixValue::StorePath(p) => p.clone(),
             NixValue::Derivation(drv) => format!("<derivation {}>", drv.name),
-            NixValue::List(_)
-            | NixValue::AttributeSet(_)
-            | NixValue::Thunk(_)
-            | NixValue::DeferredLookup(_, _)
-            | NixValue::DeferredInherit(_, _)
-            | NixValue::Function(_) => {
-                format!("{}", args[0])
+            NixValue::Function(_) | NixValue::Builtin(_) => {
+                format!("{}", forced)
+            }
+            _ => {
+                format!("{}", forced)
             }
         };
         Ok(NixValue::String(str_value))
+    }
+    fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
+        Err(Error::UnsupportedExpression {
+            reason: "toString requires evaluator context".to_string(),
+        })
     }
 }
 
@@ -490,7 +575,9 @@ impl Builtin for LengthBuiltin {
     }
 
     fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
-        Err(Error::UnsupportedExpression { reason: "length requires evaluator context".to_string() })
+        Err(Error::UnsupportedExpression {
+            reason: "length requires evaluator context".to_string(),
+        })
     }
 }
 
@@ -521,7 +608,9 @@ impl Builtin for HeadBuiltin {
     }
 
     fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
-        Err(Error::UnsupportedExpression { reason: "head requires evaluator context".to_string() })
+        Err(Error::UnsupportedExpression {
+            reason: "head requires evaluator context".to_string(),
+        })
     }
 }
 
@@ -554,7 +643,9 @@ impl Builtin for TailBuiltin {
     }
 
     fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
-        Err(Error::UnsupportedExpression { reason: "tail requires evaluator context".to_string() })
+        Err(Error::UnsupportedExpression {
+            reason: "tail requires evaluator context".to_string(),
+        })
     }
 }
 
@@ -736,34 +827,48 @@ impl Builtin for ConcatListsBuiltin {
     fn name(&self) -> &str {
         "concatLists"
     }
-    fn call(&self, args: &[NixValue]) -> Result<NixValue> {
+
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
         if args.len() != 1 {
             return Err(Error::UnsupportedExpression {
                 reason: format!("concatLists takes 1 argument, got {}", args.len()),
             });
         }
-        match &args[0] {
-            NixValue::List(lists) => {
-                let mut result = Vec::new();
-                for item in lists {
-                    match item {
-                        NixValue::List(l) => result.extend(l.clone()),
-                        _ => {
-                            return Err(Error::UnsupportedExpression {
-                                reason: format!(
-                                    "concatLists: all elements must be lists, got {}",
-                                    item
-                                ),
-                            });
-                        }
-                    }
-                }
-                Ok(NixValue::List(result))
+
+        let list_val = args[0].clone().force(evaluator)?;
+        let list = match list_val {
+            NixValue::List(l) => l,
+            _ => {
+                return Err(Error::UnsupportedExpression {
+                    reason: format!("concatLists expects a list, got {}", list_val),
+                });
             }
-            _ => Err(Error::UnsupportedExpression {
-                reason: format!("concatLists expects a list, got {}", args[0]),
-            }),
+        };
+
+        let mut result = Vec::new();
+        for item in list {
+            let inner_list_val = item.force(evaluator)?;
+            match inner_list_val {
+                NixValue::List(l) => {
+                    result.extend(l);
+                }
+                _ => {
+                    return Err(Error::UnsupportedExpression {
+                        reason: format!(
+                            "concatLists: all elements must be lists, got {}",
+                            inner_list_val
+                        ),
+                    });
+                }
+            }
         }
+        Ok(NixValue::List(result))
+    }
+
+    fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
+        Err(Error::UnsupportedExpression {
+            reason: "concatLists requires evaluator context".to_string(),
+        })
     }
 }
 
@@ -1338,27 +1443,16 @@ impl Builtin for MapBuiltin {
             NixValue::List(list) => {
                 let mut results = Vec::new();
                 for item in list {
-                    let res = match func {
-                        NixValue::Function(f) => f.apply(evaluator, item)?,
-                        NixValue::String(s) if s.starts_with("__builtin_func:") => {
-                            let name = &s[15..];
-                            let builtin = evaluator.builtins.get(name).ok_or_else(|| {
-                                Error::UnsupportedExpression {
-                                    reason: format!("unknown builtin: {}", name),
-                                }
-                            })?;
-                            builtin.call_with_evaluator(&[item], evaluator)?
-                        }
-                        _ => {
-                            return Err(Error::UnsupportedExpression {
-                                reason: format!(
-                                    "map: first argument must be a function, got {}",
-                                    func
-                                ),
-                            });
-                        }
-                    };
-                    results.push(res);
+                    let mut thunk_scope = VariableScope::new();
+                    thunk_scope.insert("__f".to_string(), func.clone());
+                    thunk_scope.insert("__v".to_string(), item);
+
+                    let thunk = NixValue::Thunk(Arc::new(crate::thunk::Thunk::new_from_text(
+                        "__f __v".to_string(),
+                        thunk_scope,
+                        evaluator.current_file_id(),
+                    )));
+                    results.push(thunk);
                 }
                 Ok(NixValue::List(results))
             }
@@ -1398,26 +1492,7 @@ impl Builtin for ConcatMapBuiltin {
             NixValue::List(list) => {
                 let mut results = Vec::new();
                 for item in list {
-                    let res = match func {
-                        NixValue::Function(f) => f.apply(evaluator, item.clone())?,
-                        NixValue::String(s) if s.starts_with("__builtin_func:") => {
-                            let name = &s[15..];
-                            let builtin = evaluator.builtins.get(name).ok_or_else(|| {
-                                Error::UnsupportedExpression {
-                                    reason: format!("unknown builtin: {}", name),
-                                }
-                            })?;
-                            builtin.call_with_evaluator(&[item.clone()], evaluator)?
-                        }
-                        _ => {
-                            return Err(Error::UnsupportedExpression {
-                                reason: format!(
-                                    "concatMap: first argument must be a function, got {}",
-                                    func
-                                ),
-                            });
-                        }
-                    };
+                    let res = func.clone().apply(evaluator, item.clone())?;
                     let inner_list = res.force(evaluator)?;
                     match inner_list {
                         NixValue::List(items) => results.extend(items),
@@ -1466,26 +1541,7 @@ impl Builtin for FilterBuiltin {
             NixValue::List(list) => {
                 let mut results = Vec::new();
                 for item in list {
-                    let res = match func {
-                        NixValue::Function(f) => f.apply(evaluator, item.clone())?,
-                        NixValue::String(s) if s.starts_with("__builtin_func:") => {
-                            let name = &s[15..];
-                            let builtin = evaluator.builtins.get(name).ok_or_else(|| {
-                                Error::UnsupportedExpression {
-                                    reason: format!("unknown builtin: {}", name),
-                                }
-                            })?;
-                            builtin.call_with_evaluator(&[item.clone()], evaluator)?
-                        }
-                        _ => {
-                            return Err(Error::UnsupportedExpression {
-                                reason: format!(
-                                    "filter: first argument must be a function, got {}",
-                                    func
-                                ),
-                            });
-                        }
-                    };
+                    let res = func.clone().apply(evaluator, item.clone())?;
                     match res.force(evaluator)? {
                         NixValue::Boolean(true) => results.push(item),
                         NixValue::Boolean(false) => {}
@@ -1530,26 +1586,7 @@ impl Builtin for AllBuiltin {
         match list_val {
             NixValue::List(list) => {
                 for item in list {
-                    let res = match func {
-                        NixValue::Function(f) => f.apply(evaluator, item.clone())?,
-                        NixValue::String(s) if s.starts_with("__builtin_func:") => {
-                            let name = &s[15..];
-                            let builtin = evaluator.builtins.get(name).ok_or_else(|| {
-                                Error::UnsupportedExpression {
-                                    reason: format!("unknown builtin: {}", name),
-                                }
-                            })?;
-                            builtin.call_with_evaluator(&[item.clone()], evaluator)?
-                        }
-                        _ => {
-                            return Err(Error::UnsupportedExpression {
-                                reason: format!(
-                                    "all: first argument must be a function, got {}",
-                                    func
-                                ),
-                            });
-                        }
-                    };
+                    let res = func.clone().apply(evaluator, item.clone())?;
                     match res.force(evaluator)? {
                         NixValue::Boolean(true) => {}
                         NixValue::Boolean(false) => return Ok(NixValue::Boolean(false)),
@@ -1594,26 +1631,7 @@ impl Builtin for AnyBuiltin {
         match list_val {
             NixValue::List(list) => {
                 for item in list {
-                    let res = match func {
-                        NixValue::Function(f) => f.apply(evaluator, item.clone())?,
-                        NixValue::String(s) if s.starts_with("__builtin_func:") => {
-                            let name = &s[15..];
-                            let builtin = evaluator.builtins.get(name).ok_or_else(|| {
-                                Error::UnsupportedExpression {
-                                    reason: format!("unknown builtin: {}", name),
-                                }
-                            })?;
-                            builtin.call_with_evaluator(&[item.clone()], evaluator)?
-                        }
-                        _ => {
-                            return Err(Error::UnsupportedExpression {
-                                reason: format!(
-                                    "any: first argument must be a function, got {}",
-                                    func
-                                ),
-                            });
-                        }
-                    };
+                    let res = func.clone().apply(evaluator, item.clone())?;
                     match res.force(evaluator)? {
                         NixValue::Boolean(true) => return Ok(NixValue::Boolean(true)),
                         NixValue::Boolean(false) => {}
@@ -1664,43 +1682,8 @@ impl Builtin for SortBuiltin {
                         return std::cmp::Ordering::Equal;
                     }
                     let res = (|| -> Result<std::cmp::Ordering> {
-                        let partial = match &func {
-                            NixValue::Function(f) => f.apply(evaluator, a.clone())?,
-                            NixValue::String(s) if s.starts_with("__builtin_func:") => {
-                                let name = &s[15..];
-                                let builtin = evaluator.builtins.get(name).ok_or_else(|| {
-                                    Error::UnsupportedExpression {
-                                        reason: format!("unknown builtin: {}", name),
-                                    }
-                                })?;
-                                builtin.call_with_evaluator(&[a.clone()], evaluator)?
-                            }
-                            _ => {
-                                return Err(Error::UnsupportedExpression {
-                                    reason: format!(
-                                        "sort: first argument must be a function, got {}",
-                                        func
-                                    ),
-                                });
-                            }
-                        };
-                        let res = match partial {
-                            NixValue::Function(next) => next.apply(evaluator, b.clone())?,
-                            NixValue::String(s) if s.starts_with("__builtin_func:") => {
-                                let name = &s[15..];
-                                let builtin = evaluator.builtins.get(name).ok_or_else(|| {
-                                    Error::UnsupportedExpression {
-                                        reason: format!("unknown builtin: {}", name),
-                                    }
-                                })?;
-                                builtin.call_with_evaluator(&[b.clone()], evaluator)?
-                            }
-                            _ => {
-                                return Err(Error::UnsupportedExpression {
-                                    reason: format!("sort: comparator must take 2 arguments"),
-                                });
-                            }
-                        };
+                        let partial = func.clone().apply(evaluator, a.clone())?;
+                        let res = partial.apply(evaluator, b.clone())?;
                         match res.force(evaluator)? {
                             NixValue::Boolean(true) => Ok(std::cmp::Ordering::Less),
                             NixValue::Boolean(false) => Ok(std::cmp::Ordering::Greater),
@@ -1836,11 +1819,35 @@ impl Builtin for FoldlStrictBuiltin {
         "foldl'"
     }
 
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
+        if args.len() != 3 {
+            return Err(Error::UnsupportedExpression {
+                reason: format!("foldl' takes 3 arguments, got {}", args.len()),
+            });
+        }
+        let op = args[0].clone();
+        let mut acc = args[1].clone();
+        let list_val = args[2].clone().force(evaluator)?;
+
+        match list_val {
+            NixValue::List(list) => {
+                for item in list {
+                    // foldl' is strict, so we force the accumulator before applying
+                    acc = acc.force(evaluator)?;
+                    let res = op.clone().apply(evaluator, acc)?;
+                    acc = res.apply(evaluator, item)?;
+                }
+                Ok(acc)
+            }
+            _ => Err(Error::UnsupportedExpression {
+                reason: format!("foldl': third argument must be a list, got {}", list_val),
+            }),
+        }
+    }
+
     fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
-        // This should never be called directly - foldl' is handled specially in evaluate_apply
-        // to call Nix functions for each element
         Err(Error::UnsupportedExpression {
-            reason: "foldl' requires evaluator context and must be handled specially".to_string(),
+            reason: "foldl' requires evaluator context".to_string(),
         })
     }
 }
@@ -2101,6 +2108,63 @@ impl Builtin for SubBuiltin {
 /// ToJSON builtin - converts a Nix value to JSON string
 pub struct ToJSONBuiltin;
 
+fn nix_value_to_json_value(value: &NixValue, evaluator: &Evaluator) -> Result<serde_json::Value> {
+    let forced = value.clone().force(evaluator)?;
+    match forced {
+        NixValue::Null => Ok(serde_json::Value::Null),
+        NixValue::Boolean(b) => Ok(serde_json::Value::Bool(b)),
+        NixValue::Integer(i) => Ok(serde_json::Value::Number(i.into())),
+        NixValue::Float(f) => {
+            let num =
+                serde_json::Number::from_f64(f).ok_or_else(|| Error::UnsupportedExpression {
+                    reason: "toJSON: float is not a valid JSON number".to_string(),
+                })?;
+            Ok(serde_json::Value::Number(num))
+        }
+        NixValue::String(s) => Ok(serde_json::Value::String(s)),
+        NixValue::Path(p) => Ok(serde_json::Value::String(p.to_string_lossy().into_owned())),
+        NixValue::StorePath(p) => Ok(serde_json::Value::String(p)),
+        NixValue::List(l) => {
+            let mut parts = Vec::new();
+            for item in l {
+                parts.push(nix_value_to_json_value(&item, evaluator)?);
+            }
+            Ok(serde_json::Value::Array(parts))
+        }
+        NixValue::AttributeSet(attrs) => {
+            // Check for __toString
+            if let Some(to_string) = attrs.get("__toString") {
+                let to_string_forced = to_string.clone().force(evaluator)?;
+                if let NixValue::Function(func) = to_string_forced {
+                    let mut attrs_copy = attrs.clone();
+                    attrs_copy.remove("__toString");
+                    let result = func.apply(evaluator, NixValue::AttributeSet(attrs_copy))?;
+                    let result_forced = result.force(evaluator)?;
+                    if let NixValue::String(s) = result_forced {
+                        return Ok(serde_json::Value::String(s));
+                    }
+                }
+            }
+
+            let mut map = serde_json::Map::new();
+            let mut keys: Vec<_> = attrs.keys().collect();
+            keys.sort();
+            for key in keys {
+                let val = attrs.get(key).unwrap();
+                let json_val = nix_value_to_json_value(val, evaluator)?;
+                map.insert(key.clone(), json_val);
+            }
+            Ok(serde_json::Value::Object(map))
+        }
+        NixValue::Function(_) | NixValue::Derivation(_) | NixValue::Builtin(_) => {
+            Err(Error::UnsupportedExpression {
+                reason: format!("toJSON: cannot convert {} to JSON", forced),
+            })
+        }
+        _ => unreachable!("force() should have resolved this"),
+    }
+}
+
 impl Builtin for ToJSONBuiltin {
     fn name(&self) -> &str {
         "toJSON"
@@ -2113,67 +2177,14 @@ impl Builtin for ToJSONBuiltin {
             });
         }
 
-        let json_str = serialize_nix_value_to_json(&args[0], evaluator)?;
+        let json_value = nix_value_to_json_value(&args[0], evaluator)?;
+        let json_str = serde_json::to_string(&json_value).unwrap();
         Ok(NixValue::String(json_str))
     }
-
     fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
         Err(Error::UnsupportedExpression {
             reason: "toJSON requires evaluator context".to_string(),
         })
-    }
-}
-
-fn serialize_nix_value_to_json(value: &NixValue, evaluator: &Evaluator) -> Result<String> {
-    let forced = value.clone().force(evaluator)?;
-    match forced {
-        NixValue::Null => Ok("null".to_string()),
-        NixValue::Boolean(b) => Ok(b.to_string()),
-        NixValue::Integer(i) => Ok(i.to_string()),
-        NixValue::Float(f) => Ok(f.to_string()),
-        NixValue::String(s) => Ok(serde_json::to_string(&s).unwrap()),
-        NixValue::Path(p) => Ok(serde_json::to_string(&p.to_string_lossy()).unwrap()),
-        NixValue::StorePath(p) => Ok(serde_json::to_string(&p).unwrap()),
-        NixValue::List(l) => {
-            let mut parts = Vec::new();
-            for item in l {
-                parts.push(serialize_nix_value_to_json(&item, evaluator)?);
-            }
-            Ok(format!("[{}]", parts.join(",")))
-        }
-        NixValue::AttributeSet(attrs) => {
-            // Check for __toString
-            if let Some(to_string) = attrs.get("__toString") {
-                let to_string_forced = to_string.clone().force(evaluator)?;
-                if let NixValue::Function(func) = to_string_forced {
-                    let mut attrs_copy = attrs.clone();
-                    attrs_copy.remove("__toString");
-                    let result = func.apply(evaluator, NixValue::AttributeSet(attrs_copy))?;
-                    let result_forced = result.force(evaluator)?;
-                    if let NixValue::String(s) = result_forced {
-                        return Ok(serde_json::to_string(&s).unwrap());
-                    }
-                }
-            }
-
-            let mut parts = Vec::new();
-            let mut keys: Vec<_> = attrs.keys().collect();
-            keys.sort();
-            for key in keys {
-                let val = attrs.get(key).unwrap();
-                let json_val = serialize_nix_value_to_json(val, evaluator)?;
-                parts.push(format!("{}:{}", serde_json::to_string(key).unwrap(), json_val));
-            }
-            Ok(format!("{{{}}}", parts.join(",")))
-        }
-        NixValue::Function(_) | NixValue::Derivation(_) => {
-            Err(Error::UnsupportedExpression {
-                reason: "cannot convert function or derivation to JSON".to_string(),
-            })
-        }
-        _ => Err(Error::UnsupportedExpression {
-            reason: format!("cannot convert {} to JSON", forced),
-        }),
     }
 }
 
@@ -2191,11 +2202,7 @@ impl Builtin for ToXMLBuiltin {
         })
     }
 
-    fn call_with_evaluator(
-        &self,
-        args: &[NixValue],
-        evaluator: &Evaluator,
-    ) -> Result<NixValue> {
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
         if args.len() != 1 {
             return Err(Error::UnsupportedExpression {
                 reason: format!("toXML takes 1 argument, got {}", args.len()),
@@ -2306,50 +2313,52 @@ impl Builtin for GenListBuiltin {
         "genList"
     }
 
-    fn call(&self, args: &[NixValue]) -> Result<NixValue> {
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
         if args.len() != 2 {
             return Err(Error::UnsupportedExpression {
                 reason: format!("genList takes 2 arguments, got {}", args.len()),
             });
         }
 
-        // Get the length
-        let _length = match &args[1] {
+        // genList generator length
+        let generator = args[0].clone().force(evaluator)?;
+        let length = match args[1].clone().force(evaluator)? {
             NixValue::Integer(n) => {
-                if *n < 0 {
+                if n < 0 {
                     return Err(Error::UnsupportedExpression {
                         reason: format!("genList: length must be non-negative, got {}", n),
                     });
                 }
-                *n as usize
+                n as usize
             }
-            _ => {
+            v => {
                 return Err(Error::UnsupportedExpression {
-                    reason: format!(
-                        "genList: second argument must be an integer, got {}",
-                        args[1]
-                    ),
+                    reason: format!("genList: second argument must be an integer, got {}", v),
                 });
             }
         };
 
-        // Get the function
-        // Note: This is a placeholder - full implementation would need evaluator context
-        // to call the Nix function for each index
-        match &args[0] {
-            NixValue::Function(_) => {
-                // For now, return an error indicating this needs evaluator context
-                Err(Error::UnsupportedExpression {
-                    reason: "genList requires evaluator context to call Nix functions".to_string(),
-                })
-            }
-            _ => Err(Error::UnsupportedExpression {
-                reason: format!(
-                    "genList: first argument must be a function, got {}",
-                    args[0]
-                ),
-            }),
+        let mut result = Vec::with_capacity(length);
+        for i in 0..length {
+            let mut thunk_scope = VariableScope::new();
+            thunk_scope.insert("__f".to_string(), generator.clone());
+            thunk_scope.insert("__i".to_string(), NixValue::Integer(i as i64));
+
+            let thunk = NixValue::Thunk(Arc::new(crate::thunk::Thunk::new_from_text(
+                "__f __i".to_string(),
+                thunk_scope,
+                evaluator.current_file_id(),
+            )));
+            result.push(thunk);
         }
+
+        Ok(NixValue::List(result))
+    }
+
+    fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
+        Err(Error::UnsupportedExpression {
+            reason: "genList requires evaluator context".to_string(),
+        })
     }
 }
 
@@ -2362,12 +2371,30 @@ impl Builtin for PathExistsBuiltin {
     }
 
     fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
-        // This should never be called directly - pathExists is handled specially in evaluate_apply
-        // to resolve paths relative to the current file
         Err(Error::UnsupportedExpression {
-            reason: "pathExists requires evaluator context and must be handled specially"
-                .to_string(),
+            reason: format!("{} requires evaluator context", self.name()),
         })
+    }
+
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
+        if args.len() != 1 {
+            return Err(Error::UnsupportedExpression {
+                reason: format!("pathExists takes 1 argument, got {}", args.len()),
+            });
+        }
+        let path_val = args[0].clone().force(evaluator)?;
+        let path_str = match path_val {
+            NixValue::String(s) => s,
+            NixValue::Path(p) => p.to_string_lossy().to_string(),
+            _ => {
+                return Err(Error::UnsupportedExpression {
+                    reason: "pathExists: argument must be a string or path".to_string(),
+                });
+            }
+        };
+
+        let resolved_path = evaluator.resolve_path(&std::path::PathBuf::from(path_str));
+        Ok(NixValue::Boolean(resolved_path.exists()))
     }
 }
 
@@ -2380,11 +2407,35 @@ impl Builtin for ReadFileBuiltin {
     }
 
     fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
-        // This should never be called directly - readFile is handled specially in evaluate_apply
-        // to resolve paths relative to the current file
         Err(Error::UnsupportedExpression {
-            reason: "readFile requires evaluator context and must be handled specially".to_string(),
+            reason: format!("{} requires evaluator context", self.name()),
         })
+    }
+
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
+        if args.len() != 1 {
+            return Err(Error::UnsupportedExpression {
+                reason: format!("readFile takes 1 argument, got {}", args.len()),
+            });
+        }
+        let path_val = args[0].clone().force(evaluator)?;
+        let path_str = match path_val {
+            NixValue::String(s) => s,
+            NixValue::Path(p) => p.to_string_lossy().to_string(),
+            _ => {
+                return Err(Error::UnsupportedExpression {
+                    reason: "readFile: argument must be a string or path".to_string(),
+                });
+            }
+        };
+
+        let resolved_path = evaluator.resolve_path(&std::path::PathBuf::from(path_str));
+        let content =
+            std::fs::read_to_string(resolved_path).map_err(|e| Error::UnsupportedExpression {
+                reason: format!("readFile: failed to read file: {}", e),
+            })?;
+
+        Ok(NixValue::String(content))
     }
 }
 
@@ -2396,32 +2447,34 @@ impl Builtin for RemoveAttrsBuiltin {
         "removeAttrs"
     }
 
-    fn call(&self, args: &[NixValue]) -> Result<NixValue> {
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
         if args.len() != 2 {
             return Err(Error::UnsupportedExpression {
                 reason: format!("removeAttrs takes 2 arguments, got {}", args.len()),
             });
         }
 
-        let attrs = match &args[0] {
+        let attrs_val = args[0].clone().force(evaluator)?;
+        let attrs = match attrs_val {
             NixValue::AttributeSet(a) => a,
             _ => {
                 return Err(Error::UnsupportedExpression {
                     reason: format!(
                         "removeAttrs: first argument must be an attribute set, got {}",
-                        args[0]
+                        attrs_val
                     ),
                 });
             }
         };
 
-        let keys_to_remove = match &args[1] {
+        let keys_val = args[1].clone().force(evaluator)?;
+        let keys_to_remove = match keys_val {
             NixValue::List(l) => l,
             _ => {
                 return Err(Error::UnsupportedExpression {
                     reason: format!(
                         "removeAttrs: second argument must be a list, got {}",
-                        args[1]
+                        keys_val
                     ),
                 });
             }
@@ -2430,13 +2483,14 @@ impl Builtin for RemoveAttrsBuiltin {
         // Collect keys to remove as strings
         let mut keys_set = std::collections::HashSet::new();
         for key_value in keys_to_remove {
-            let key = match key_value {
-                NixValue::String(s) => s.clone(),
+            let key_forced = key_value.force(evaluator)?;
+            let key = match key_forced {
+                NixValue::String(s) => s,
                 _ => {
                     return Err(Error::UnsupportedExpression {
                         reason: format!(
                             "removeAttrs: list must contain strings, got {}",
-                            key_value
+                            key_forced
                         ),
                     });
                 }
@@ -2447,12 +2501,18 @@ impl Builtin for RemoveAttrsBuiltin {
         // Create new attribute set without the removed keys
         let mut new_attrs = HashMap::new();
         for (key, value) in attrs {
-            if !keys_set.contains(key) {
+            if !keys_set.contains(&key) {
                 new_attrs.insert(key.clone(), value.clone());
             }
         }
 
         Ok(NixValue::AttributeSet(new_attrs))
+    }
+
+    fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
+        Err(Error::UnsupportedExpression {
+            reason: "removeAttrs requires evaluator context".to_string(),
+        })
     }
 }
 
@@ -2500,11 +2560,48 @@ impl Builtin for MapAttrsBuiltin {
         "mapAttrs"
     }
 
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
+        if args.len() != 2 {
+            return Err(Error::UnsupportedExpression {
+                reason: format!("mapAttrs takes 2 arguments, got {}", args.len()),
+            });
+        }
+
+        let f = args[0].clone();
+        let attrs_val = args[1].clone().force(evaluator)?;
+        let attrs = match attrs_val {
+            NixValue::AttributeSet(a) => a,
+            _ => {
+                return Err(Error::UnsupportedExpression {
+                    reason: format!(
+                        "mapAttrs: second argument must be an attribute set, got {}",
+                        attrs_val
+                    ),
+                });
+            }
+        };
+
+        let mut result = HashMap::new();
+        for (name, value) in attrs {
+            let mut thunk_scope = VariableScope::new();
+            thunk_scope.insert("__f".to_string(), f.clone());
+            thunk_scope.insert("__n".to_string(), NixValue::String(name.clone()));
+            thunk_scope.insert("__v".to_string(), value.clone());
+
+            let thunk = NixValue::Thunk(Arc::new(crate::thunk::Thunk::new_from_text(
+                "__f __n __v".to_string(),
+                thunk_scope,
+                evaluator.current_file_id(),
+            )));
+            result.insert(name, thunk);
+        }
+
+        Ok(NixValue::AttributeSet(result))
+    }
+
     fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
-        // This should never be called directly - mapAttrs is handled specially in evaluate_apply
-        // to call Nix functions for each attribute
         Err(Error::UnsupportedExpression {
-            reason: "mapAttrs requires evaluator context and must be handled specially".to_string(),
+            reason: "mapAttrs requires evaluator context".to_string(),
         })
     }
 }
@@ -2518,11 +2615,60 @@ impl Builtin for ReadDirBuiltin {
     }
 
     fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
-        // This should never be called directly - readDir is handled specially in evaluate_apply
-        // to resolve paths relative to the current file
         Err(Error::UnsupportedExpression {
-            reason: "readDir requires evaluator context and must be handled specially".to_string(),
+            reason: format!("{} requires evaluator context", self.name()),
         })
+    }
+
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
+        if args.len() != 1 {
+            return Err(Error::UnsupportedExpression {
+                reason: format!("readDir takes 1 argument, got {}", args.len()),
+            });
+        }
+        let path_val = args[0].clone().force(evaluator)?;
+        let path_str = match path_val {
+            NixValue::String(s) => s,
+            NixValue::Path(p) => p.to_string_lossy().to_string(),
+            _ => {
+                return Err(Error::UnsupportedExpression {
+                    reason: "readDir: argument must be a string or path".to_string(),
+                });
+            }
+        };
+
+        let resolved_path = evaluator.resolve_path(&std::path::PathBuf::from(path_str));
+        let entries =
+            std::fs::read_dir(resolved_path).map_err(|e| Error::UnsupportedExpression {
+                reason: format!("readDir: failed to read directory: {}", e),
+            })?;
+
+        let mut result = HashMap::new();
+        for entry in entries {
+            let entry = entry.map_err(|e| Error::UnsupportedExpression {
+                reason: format!("readDir: directory entry error: {}", e),
+            })?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            let ft = entry
+                .file_type()
+                .map_err(|e| Error::UnsupportedExpression {
+                    reason: format!("readDir: file type error: {}", e),
+                })?;
+
+            let type_str = if ft.is_dir() {
+                "directory"
+            } else if ft.is_file() {
+                "regular"
+            } else if ft.is_symlink() {
+                "symlink"
+            } else {
+                "unknown"
+            };
+
+            result.insert(name, NixValue::String(type_str.to_string()));
+        }
+
+        Ok(NixValue::AttributeSet(result))
     }
 }
 
@@ -2535,12 +2681,48 @@ impl Builtin for ReadFileTypeBuiltin {
     }
 
     fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
-        // This should never be called directly - readFileType is handled specially in evaluate_apply
-        // to resolve paths relative to the current file
         Err(Error::UnsupportedExpression {
-            reason: "readFileType requires evaluator context and must be handled specially"
-                .to_string(),
+            reason: format!("{} requires evaluator context", self.name()),
         })
+    }
+
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
+        if args.len() != 1 {
+            return Err(Error::UnsupportedExpression {
+                reason: format!("readFileType takes 1 argument, got {}", args.len()),
+            });
+        }
+        let path_val = args[0].clone().force(evaluator)?;
+        let path_str = match path_val {
+            NixValue::String(s) => s,
+            NixValue::Path(p) => p.to_string_lossy().to_string(),
+            _ => {
+                return Err(Error::UnsupportedExpression {
+                    reason: "readFileType: argument must be a string or path".to_string(),
+                });
+            }
+        };
+
+        let resolved_path = evaluator.resolve_path(&std::path::PathBuf::from(path_str));
+        let metadata =
+            std::fs::symlink_metadata(resolved_path).map_err(|e| Error::UnsupportedExpression {
+                reason: format!("readFileType: failed to get metadata: {}", e),
+            })?;
+
+        let ft = metadata.file_type();
+        let type_str = if ft.is_dir() {
+            "directory"
+        } else if ft.is_file() {
+            "regular"
+            // Symlink should be handled but metadata.file_type() might need more.
+            // On Unix it works, on Windows it's different.
+        } else if ft.is_symlink() {
+            "symlink"
+        } else {
+            "unknown"
+        };
+
+        Ok(NixValue::String(type_str.to_string()))
     }
 }
 
@@ -2552,18 +2734,18 @@ impl Builtin for LessThanBuiltin {
         "lessThan"
     }
 
-    fn call(&self, args: &[NixValue]) -> Result<NixValue> {
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
         if args.len() != 2 {
             return Err(Error::UnsupportedExpression {
                 reason: format!("lessThan takes 2 arguments, got {}", args.len()),
             });
         }
 
-        let a = &args[0];
-        let b = &args[1];
+        let a = args[0].clone().force(evaluator)?;
+        let b = args[1].clone().force(evaluator)?;
 
         // Compare based on type
-        let result = match (a, b) {
+        let result = match (&a, &b) {
             (NixValue::Integer(x), NixValue::Integer(y)) => x < y,
             (NixValue::Float(x), NixValue::Float(y)) => x < y,
             (NixValue::Integer(x), NixValue::Float(y)) => (*x as f64) < *y,
@@ -2572,24 +2754,37 @@ impl Builtin for LessThanBuiltin {
             (NixValue::Path(x), NixValue::Path(y)) => x < y,
             (NixValue::List(x), NixValue::List(y)) => {
                 let mut is_less = false;
+                let mut found_difference = false;
                 for (xi, yi) in x.iter().zip(y.iter()) {
-                    match self.call(&[xi.clone(), yi.clone()]) {
-                        Ok(NixValue::Boolean(true)) => {
+                    match self.call_with_evaluator(&[xi.clone(), yi.clone()], evaluator)? {
+                        NixValue::Boolean(true) => {
                             is_less = true;
+                            found_difference = true;
                             break;
                         }
-                        Ok(NixValue::Boolean(false)) => {
-                            if xi != yi {
-                                // Not equal and not less, so greater
-                                return Ok(NixValue::Boolean(false));
+                        NixValue::Boolean(false) => {
+                            // Check if yi < xi to detect if they are equal
+                            match self.call_with_evaluator(&[yi.clone(), xi.clone()], evaluator)? {
+                                NixValue::Boolean(true) => {
+                                    // xi > yi
+                                    is_less = false;
+                                    found_difference = true;
+                                    break;
+                                }
+                                NixValue::Boolean(false) => {
+                                    // xi == yi, continue
+                                }
+                                _ => unreachable!(),
                             }
-                            // Equal, continue to next element
                         }
-                        Err(e) => return Err(e),
                         _ => unreachable!(),
                     }
                 }
-                if is_less { true } else { x.len() < y.len() }
+                if found_difference {
+                    is_less
+                } else {
+                    x.len() < y.len()
+                }
             }
             _ => {
                 return Err(Error::UnsupportedExpression {
@@ -2600,95 +2795,88 @@ impl Builtin for LessThanBuiltin {
 
         Ok(NixValue::Boolean(result))
     }
+    fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
+        Err(Error::UnsupportedExpression {
+            reason: "lessThan requires evaluator context".to_string(),
+        })
+    }
 }
 
 /// ListToAttrs builtin - converts a list of attribute sets to an attribute set
 pub struct ListToAttrsBuiltin;
-
 impl Builtin for ListToAttrsBuiltin {
     fn name(&self) -> &str {
         "listToAttrs"
     }
 
-    fn call(&self, args: &[NixValue]) -> Result<NixValue> {
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
         if args.len() != 1 {
             return Err(Error::UnsupportedExpression {
                 reason: format!("listToAttrs takes 1 argument, got {}", args.len()),
             });
         }
 
-        let list = match &args[0] {
+        let list_val = args[0].clone().force(evaluator)?;
+        let list = match list_val {
             NixValue::List(l) => l,
             _ => {
                 return Err(Error::UnsupportedExpression {
-                    reason: format!("listToAttrs expects a list, got {}", args[0]),
+                    reason: format!("listToAttrs: argument must be a list, got {}", list_val),
                 });
             }
         };
 
-        let mut attrs = HashMap::new();
-
-        // Process each element in the list
-        // Note: We need to force elements to get attribute sets, but NOT force the "value" attributes
-        // This requires evaluator context, so listToAttrs should be handled specially in evaluate_apply
-        // For now, we'll handle it here but this might need to be moved to evaluate_apply
-        for elem in list {
-            // Each element should be an attribute set with "name" and "value" keys
-            // Don't force the element here - it will be forced when accessed
-            let elem_attrs = match elem {
+        let mut result = HashMap::new();
+        for item in list {
+            let item_forced = item.force(evaluator)?;
+            let item_attrs = match item_forced {
                 NixValue::AttributeSet(a) => a,
-                NixValue::Thunk(_) => {
-                    // Element is a thunk - we can't force it here without evaluator context
-                    // This will be handled specially in evaluate_apply
-                    return Err(Error::UnsupportedExpression {
-                        reason: "listToAttrs: requires evaluator context for lazy evaluation"
-                            .to_string(),
-                    });
-                }
                 _ => {
                     return Err(Error::UnsupportedExpression {
                         reason: format!(
-                            "listToAttrs: list element must be an attribute set, got {}",
-                            elem
+                            "listToAttrs: each element must be an attribute set, got {}",
+                            item_forced
                         ),
                     });
                 }
             };
 
-            // Get the "name" attribute - this needs to be forced to get the string
-            // But we can't force it here without evaluator context
-            let name_value =
-                elem_attrs
-                    .get("name")
-                    .ok_or_else(|| Error::UnsupportedExpression {
-                        reason: format!("listToAttrs: element must have a 'name' attribute"),
-                    })?;
-
-            // Try to get the name without forcing (if it's already a string)
-            let name = match name_value {
-                NixValue::String(s) => s.clone(),
+            let name_val = item_attrs
+                .get("name")
+                .ok_or_else(|| Error::UnsupportedExpression {
+                    reason: "listToAttrs: element must have a 'name' attribute".to_string(),
+                })?;
+            let name_forced = name_val.clone().force(evaluator)?;
+            let name = match name_forced {
+                NixValue::String(s) => s,
                 _ => {
-                    // Name is a thunk - we can't force it here
                     return Err(Error::UnsupportedExpression {
-                        reason: "listToAttrs: requires evaluator context to force 'name' attribute"
-                            .to_string(),
+                        reason: format!(
+                            "listToAttrs: 'name' attribute must be a string, got {}",
+                            name_forced
+                        ),
                     });
                 }
             };
 
-            // Get the "value" attribute - DON'T force it! Just clone it (preserves thunks)
-            let value = elem_attrs
+            let value = item_attrs
                 .get("value")
                 .ok_or_else(|| Error::UnsupportedExpression {
-                    reason: format!("listToAttrs: element must have a 'value' attribute"),
+                    reason: "listToAttrs: element must have a 'value' attribute".to_string(),
                 })?
                 .clone();
 
             // Insert into result (first occurrence wins if duplicate names)
-            attrs.entry(name).or_insert(value);
+            result.entry(name).or_insert(value);
         }
 
-        Ok(NixValue::AttributeSet(attrs))
+        Ok(NixValue::AttributeSet(result))
+    }
+
+    fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
+        Err(Error::UnsupportedExpression {
+            reason: "listToAttrs requires evaluator context".to_string(),
+        })
     }
 }
 
@@ -2700,12 +2888,61 @@ impl Builtin for PartitionBuiltin {
         "partition"
     }
 
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
+        if args.len() != 2 {
+            return Err(Error::UnsupportedExpression {
+                reason: format!("partition takes 2 arguments, got {}", args.len()),
+            });
+        }
+
+        let pred = args[0].clone();
+        let list_val = args[1].clone().force(evaluator)?;
+        let list = match list_val {
+            NixValue::List(l) => l,
+            _ => {
+                return Err(Error::UnsupportedExpression {
+                    reason: format!(
+                        "partition: second argument must be a list, got {}",
+                        list_val
+                    ),
+                });
+            }
+        };
+
+        let mut right = Vec::new();
+        let mut wrong = Vec::new();
+
+        for item in list {
+            let res = pred
+                .clone()
+                .apply(evaluator, item.clone())?
+                .force(evaluator)?;
+            match res {
+                NixValue::Boolean(b) => {
+                    if b {
+                        right.push(item);
+                    } else {
+                        wrong.push(item);
+                    }
+                }
+                _ => {
+                    return Err(Error::UnsupportedExpression {
+                        reason: format!("partition: predicate must return a boolean, got {}", res),
+                    });
+                }
+            }
+        }
+
+        let mut result = HashMap::new();
+        result.insert("right".to_string(), NixValue::List(right));
+        result.insert("wrong".to_string(), NixValue::List(wrong));
+
+        Ok(NixValue::AttributeSet(result))
+    }
+
     fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
-        // This should never be called directly - partition is handled specially in evaluate_apply
-        // to call the predicate function for each element
         Err(Error::UnsupportedExpression {
-            reason: "partition requires evaluator context and must be handled specially"
-                .to_string(),
+            reason: "partition requires evaluator context".to_string(),
         })
     }
 }
@@ -2798,11 +3035,45 @@ impl Builtin for GroupByBuiltin {
         "groupBy"
     }
 
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
+        if args.len() != 2 {
+            return Err(Error::UnsupportedExpression {
+                reason: format!("groupBy takes 2 arguments, got {}", args.len()),
+            });
+        }
+
+        let func = args[0].clone().force(evaluator)?;
+        let list_val = args[1].clone().force(evaluator)?;
+        let list = match list_val {
+            NixValue::List(l) => l,
+            _ => {
+                return Err(Error::UnsupportedExpression {
+                    reason: "groupBy: second argument must be a list".to_string(),
+                });
+            }
+        };
+
+        let mut groups: HashMap<String, Vec<NixValue>> = HashMap::new();
+        for item in list {
+            let key_val = func
+                .clone()
+                .apply(evaluator, item.clone())?
+                .force(evaluator)?;
+            let key = key_val.as_string()?;
+            groups.entry(key).or_default().push(item);
+        }
+
+        let mut result = HashMap::new();
+        for (key, values) in groups {
+            result.insert(key, NixValue::List(values));
+        }
+
+        Ok(NixValue::AttributeSet(result))
+    }
+
     fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
-        // This should never be called directly - groupBy is handled specially in evaluate_apply
-        // to call the key function for each element
         Err(Error::UnsupportedExpression {
-            reason: "groupBy requires evaluator context and must be handled specially".to_string(),
+            reason: "groupBy requires evaluator context".to_string(),
         })
     }
 }
@@ -3008,7 +3279,7 @@ impl Builtin for ReplaceStringsBuiltin {
     }
 }
 
-/// Split builtin - splits a string using a regular expression
+/// Split builtin - splits a string using a regex
 pub struct SplitBuiltin;
 
 impl Builtin for SplitBuiltin {
@@ -3016,38 +3287,34 @@ impl Builtin for SplitBuiltin {
         "split"
     }
 
-    fn call(&self, args: &[NixValue]) -> Result<NixValue> {
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
         if args.len() != 2 {
             return Err(Error::UnsupportedExpression {
                 reason: format!("split takes 2 arguments, got {}", args.len()),
             });
         }
 
-        let regex_str = match &args[0] {
+        let regex_val = args[0].clone().force(evaluator)?;
+        let regex_str = match regex_val {
             NixValue::String(s) => s,
             _ => {
                 return Err(Error::UnsupportedExpression {
-                    reason: format!(
-                        "split: first argument must be a string (regex), got {}",
-                        args[0]
-                    ),
+                    reason: format!("split: first argument must be a string, got {}", regex_val),
                 });
             }
         };
 
-        let s = match &args[1] {
+        let s_val = args[1].clone().force(evaluator)?;
+        let s = match s_val {
             NixValue::String(s) => s,
             _ => {
                 return Err(Error::UnsupportedExpression {
-                    reason: format!("split: second argument must be a string, got {}", args[1]),
+                    reason: format!("split: second argument must be a string, got {}", s_val),
                 });
             }
         };
 
-        // Use regex crate for splitting
-        // Note: Nix uses POSIX extended regex, but we'll use Rust's regex crate
-        // Nix's split returns a list where even indices are non-matches and odd indices are matches
-        let re = match Regex::new(regex_str) {
+        let re = match Regex::new(&regex_str) {
             Ok(r) => r,
             Err(e) => {
                 return Err(Error::UnsupportedExpression {
@@ -3056,32 +3323,124 @@ impl Builtin for SplitBuiltin {
             }
         };
 
-        // Split the string and collect matches
-        // Nix's split returns a list where even indices are non-matches and odd indices are matches
         let mut result = Vec::new();
         let mut last_end = 0;
 
-        for mat in re.find_iter(s) {
-            // Add the part before the match
-            if mat.start() > last_end {
-                result.push(NixValue::String(s[last_end..mat.start()].to_string()));
+        for caps in re.captures_iter(&s) {
+            let full_match = caps.get(0).unwrap();
+
+            // Text before the match
+            if full_match.start() > last_end {
+                result.push(NixValue::String(
+                    s[last_end..full_match.start()].to_string(),
+                ));
             }
-            // Add the match itself
-            result.push(NixValue::String(mat.as_str().to_string()));
-            last_end = mat.end();
+
+            // Capture groups (Nix excluding the full match)
+            let mut groups = Vec::new();
+            for i in 1..caps.len() {
+                groups.push(match caps.get(i) {
+                    Some(m) => NixValue::String(m.as_str().to_string()),
+                    None => NixValue::Null,
+                });
+            }
+            result.push(NixValue::List(groups));
+
+            last_end = full_match.end();
         }
 
-        // Add the remaining part after the last match
+        // Final part after last match
         if last_end < s.len() {
             result.push(NixValue::String(s[last_end..].to_string()));
-        }
-
-        // If no matches, return the whole string
-        if result.is_empty() {
-            result.push(NixValue::String(s.clone()));
+        } else if last_end == 0 && s.is_empty() {
+            // Handle empty string split specially if needed? Nix returns [""]
+            result.push(NixValue::String("".to_string()));
         }
 
         Ok(NixValue::List(result))
+    }
+
+    fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
+        Err(Error::UnsupportedExpression {
+            reason: "split requires evaluator context".to_string(),
+        })
+    }
+}
+
+/// Match builtin - matches a string against a regex
+pub struct MatchBuiltin;
+
+impl Builtin for MatchBuiltin {
+    fn name(&self) -> &str {
+        "match"
+    }
+
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
+        if args.len() != 2 {
+            return Err(Error::UnsupportedExpression {
+                reason: format!("match takes 2 arguments, got {}", args.len()),
+            });
+        }
+
+        let regex_val = args[0].clone().force(evaluator)?;
+        let regex_str = match regex_val {
+            NixValue::String(s) => s,
+            _ => {
+                return Err(Error::UnsupportedExpression {
+                    reason: format!("match: first argument must be a string, got {}", regex_val),
+                });
+            }
+        };
+
+        let s_val = args[1].clone().force(evaluator)?;
+        let s = match s_val {
+            NixValue::String(s) => s,
+            _ => {
+                return Err(Error::UnsupportedExpression {
+                    reason: format!("match: second argument must be a string, got {}", s_val),
+                });
+            }
+        };
+
+        // Nix match must match the ENTIRE string
+        let anchored_regex = format!("^({})$", regex_str);
+        let re = match Regex::new(&anchored_regex) {
+            Ok(r) => r,
+            Err(e) => {
+                return Err(Error::UnsupportedExpression {
+                    reason: format!("match: invalid regex '{}': {}", regex_str, e),
+                });
+            }
+        };
+
+        if let Some(caps) = re.captures(&s) {
+            let mut groups = Vec::new();
+            // Nix match returns capture groups of the ORIGINAL regex.
+            // Since we wrapped in (...), our index 1 is the whole match.
+            // We want the groups FROM THE USER'S REGEX.
+            // Actually, because we added ^( ... )$, user's group 1 is now our group 2.
+            // Wait! If user had groups, they start at index 2 of our re.
+            // But if user didn't have groups, they should get an empty list if it matches?
+            // Nix: "If the pattern matches, the result is a list of strings... one for each parenthesized subexpression."
+
+            // Let's count groups in original regex first?
+            // Or just skip our index 1.
+            for i in 2..caps.len() {
+                groups.push(match caps.get(i) {
+                    Some(m) => NixValue::String(m.as_str().to_string()),
+                    None => NixValue::Null,
+                });
+            }
+            Ok(NixValue::List(groups))
+        } else {
+            Ok(NixValue::Null)
+        }
+    }
+
+    fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
+        Err(Error::UnsupportedExpression {
+            reason: "match requires evaluator context".to_string(),
+        })
     }
 }
 
@@ -3291,5 +3650,48 @@ impl Builtin for NixVersionBuiltin {
         // Return a version string compatible with nixpkgs checks
         // Using "2.18" as a safe default that works with most checks
         Ok(NixValue::String("2.18".to_string()))
+    }
+}
+
+/// FunctionArgs builtin - returns an attribute set describing a functions parameters
+pub struct FunctionArgsBuiltin;
+impl Builtin for FunctionArgsBuiltin {
+    fn name(&self) -> &str {
+        "functionArgs"
+    }
+
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
+        if args.len() != 1 {
+            return Err(Error::UnsupportedExpression {
+                reason: format!("functionArgs takes 1 argument, got {}", args.len()),
+            });
+        }
+
+        let func_val = args[0].clone().force(evaluator)?;
+        match func_val {
+            NixValue::Function(func) => {
+                let mut result = HashMap::new();
+                match func.parameter() {
+                    crate::function::Parameter::Simple(_) => {
+                        // Simple functions dont have named arguments for functionArgs
+                    }
+                    crate::function::Parameter::Pattern { entries, .. } => {
+                        for (name, default) in entries {
+                            result.insert(name.clone(), NixValue::Boolean(default.is_some()));
+                        }
+                    }
+                }
+                Ok(NixValue::AttributeSet(result))
+            }
+            _ => Err(Error::UnsupportedExpression {
+                reason: "functionArgs: argument must be a function".to_string(),
+            }),
+        }
+    }
+
+    fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
+        Err(Error::UnsupportedExpression {
+            reason: "functionArgs requires evaluator context".to_string(),
+        })
     }
 }

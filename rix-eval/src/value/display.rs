@@ -97,6 +97,9 @@ impl fmt::Display for NixValue {
             NixValue::DeferredInherit(_, name) => {
                 write!(f, "<deferred inherit: {}>", name)
             }
+            NixValue::Builtin(name) => {
+                write!(f, "<builtin: {}>", name)
+            }
         }
     }
 }
@@ -124,6 +127,7 @@ impl PartialEq for NixValue {
             (NixValue::DeferredInherit(_, a_name), NixValue::DeferredInherit(_, b_name)) => {
                 a_name == b_name
             }
+            (NixValue::Builtin(a), NixValue::Builtin(b)) => a == b,
             _ => false,
         }
     }

@@ -59,52 +59,12 @@ impl Evaluator {
     ) -> Result<NixValue> {
         // Check if this is an indented string (multiline string using '')
         // In rnix, indented strings are represented differently - check the syntax
-        let syntax_text = str_expr.syntax().text().to_string();
-        let is_indented = syntax_text.trim_start().starts_with("''");
-
         let mut result = String::new();
 
-        // Iterate over the parts of the string
-        // In rnix, strings are composed of InterpolPart which can be either
-        // a string literal or an interpolated expression
-        for part in str_expr.parts() {
+        for part in str_expr.normalized_parts() {
             match part {
-                InterpolPart::Literal(literal) => {
-                    // This is a literal string part
-                    let part_text = literal.to_string();
-
-                    if is_indented {
-                        // For indented strings, handle special escaping
-                        // '' becomes ', ''${ becomes ${, ''\n becomes \n, etc.
-                        let mut unescaped = part_text
-                            .replace("''", "'") // '' becomes '
-                            .replace("''${", "${") // ''${ becomes ${
-                            .replace("''\\n", "\\n") // ''\n becomes \n
-                            .replace("''\\r", "\\r") // ''\r becomes \r
-                            .replace("''\\t", "\\t"); // ''\t becomes \t
-
-                        // Now handle regular escape sequences
-                        unescaped = unescaped
-                            .replace("\\n", "\n")
-                            .replace("\\r", "\r")
-                            .replace("\\t", "\t")
-                            .replace("\\\"", "\"")
-                            .replace("\\\\", "\\");
-
-                        result.push_str(&unescaped);
-                    } else {
-                        // Regular string - unescape normally
-                        // Handle backslash-newline line continuation first (backslash followed by actual newline)
-                        let mut unescaped = part_text.replace("\\\n", "\n");
-                        // Handle other escape sequences
-                        unescaped = unescaped
-                            .replace("\\n", "\n")
-                            .replace("\\t", "\t")
-                            .replace("\\\"", "\"")
-                            .replace("\\\\", "\\")
-                            .replace("\\${", "${"); // Unescape ${ in strings
-                        result.push_str(&unescaped);
-                    }
+                InterpolPart::Literal(unescaped) => {
+                    result.push_str(&unescaped);
                 }
                 InterpolPart::Interpolation(interp) => {
                     // This is an interpolated expression - get the expression
@@ -128,7 +88,8 @@ impl Evaluator {
                             | NixValue::Thunk(_)
                             | NixValue::DeferredLookup(_, _)
                             | NixValue::DeferredInherit(_, _)
-                            | NixValue::Function(_) => {
+                            | NixValue::Function(_)
+                            | NixValue::Builtin(_) => {
                                 // For complex types, use their Display implementation
                                 format!("{}", value_forced)
                             }
@@ -141,40 +102,6 @@ impl Evaluator {
                         });
                     }
                 }
-            }
-        }
-
-        // For indented strings, strip common indentation from all lines
-        if is_indented {
-            // Split into lines and find minimum indentation
-            let lines: Vec<&str> = result.lines().collect();
-            if !lines.is_empty() {
-                // Find minimum indentation (excluding empty lines)
-                let mut min_indent = usize::MAX;
-                for line in &lines {
-                    if !line.trim().is_empty() {
-                        let indent = line.len() - line.trim_start().len();
-                        min_indent = min_indent.min(indent);
-                    }
-                }
-
-                // Strip the minimum indentation from each line
-                let mut stripped_lines = Vec::new();
-                for line in &lines {
-                    if line.trim().is_empty() {
-                        stripped_lines.push("");
-                    } else {
-                        let indent = line.len() - line.trim_start().len();
-                        if indent >= min_indent {
-                            stripped_lines.push(&line[min_indent..]);
-                        } else {
-                            stripped_lines.push(line);
-                        }
-                    }
-                }
-
-                // Join lines with \n
-                result = stripped_lines.join("\n");
             }
         }
 

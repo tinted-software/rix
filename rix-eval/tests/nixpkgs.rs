@@ -1317,6 +1317,11 @@ mod flake_outputs {
     /// Requires: Flake output evaluation
     #[test]
     fn test_flake_outputs_structure() {
+        if !nixpkgs_available() {
+            eprintln!("Skipping: nixpkgs not available");
+            return;
+        }
+
         let expr = r#"
         {
           packages.x86_64-linux.hello = (import <nixpkgs> {}).hello;

@@ -7,23 +7,29 @@ use super::{AstToken, InterpolPart, StrContent, support::children_tokens_u};
 
 impl ast::Str {
     pub fn parts(&self) -> impl Iterator<Item = InterpolPart<StrContent>> {
-        self.syntax().children_with_tokens().filter_map(|child| match child {
-            NodeOrToken::Token(token) if token.kind() == TOKEN_STRING_CONTENT => {
-                Some(InterpolPart::Literal(StrContent::cast(token).unwrap()))
-            }
-            NodeOrToken::Token(token) => {
-                assert!(token.kind() == TOKEN_STRING_START || token.kind() == TOKEN_STRING_END);
-                None
-            }
-            NodeOrToken::Node(node) => {
-                assert_eq!(node.kind(), NODE_INTERPOL);
-                Some(InterpolPart::Interpolation(ast::Interpol::cast(node).unwrap()))
-            }
-        })
+        self.syntax()
+            .children_with_tokens()
+            .filter_map(|child| match child {
+                NodeOrToken::Token(token) if token.kind() == TOKEN_STRING_CONTENT => {
+                    Some(InterpolPart::Literal(StrContent::cast(token).unwrap()))
+                }
+                NodeOrToken::Token(token) => {
+                    assert!(token.kind() == TOKEN_STRING_START || token.kind() == TOKEN_STRING_END);
+                    None
+                }
+                NodeOrToken::Node(node) => {
+                    assert_eq!(node.kind(), NODE_INTERPOL);
+                    Some(InterpolPart::Interpolation(
+                        ast::Interpol::cast(node).unwrap(),
+                    ))
+                }
+            })
     }
 
     pub fn normalized_parts(&self) -> Vec<InterpolPart<String>> {
-        let multiline = children_tokens_u(self).next().is_some_and(|t| t.text() == "''");
+        let multiline = children_tokens_u(self)
+            .next()
+            .is_some_and(|t| t.text() == "''");
         let mut is_first_literal = true;
         let mut at_start_of_line = true;
         let mut min_indent = 1000000;
@@ -217,10 +223,16 @@ mod tests {
 
     #[test]
     fn string_unescapes() {
-        assert_eq!(unescape(r#"Hello\n\"World\" :D"#, false), "Hello\n\"World\" :D");
+        assert_eq!(
+            unescape(r#"Hello\n\"World\" :D"#, false),
+            "Hello\n\"World\" :D"
+        );
         assert_eq!(unescape(r#"\"Hello\""#, false), "\"Hello\"");
 
-        assert_eq!(unescape(r#"Hello''\n'''World''' :D"#, true), "Hello\n''World'' :D");
+        assert_eq!(
+            unescape(r#"Hello''\n'''World''' :D"#, true),
+            "Hello\n''World'' :D"
+        );
         assert_eq!(unescape(r#""Hello""#, true), "\"Hello\"");
     }
     #[test]

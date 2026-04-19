@@ -7,15 +7,17 @@ use super::{InterpolPart, PathContent};
 
 impl ast::nodes::Path {
     pub fn parts(&self) -> impl Iterator<Item = InterpolPart<PathContent>> {
-        self.syntax().children_with_tokens().map(|child| match child {
-            NodeOrToken::Token(token) => {
-                assert_eq!(token.kind(), TOKEN_PATH);
-                InterpolPart::Literal(PathContent::cast(token).unwrap())
-            }
-            NodeOrToken::Node(node) => {
-                InterpolPart::Interpolation(ast::Interpol::cast(node).unwrap())
-            }
-        })
+        self.syntax()
+            .children_with_tokens()
+            .map(|child| match child {
+                NodeOrToken::Token(token) => {
+                    assert_eq!(token.kind(), TOKEN_PATH);
+                    InterpolPart::Literal(PathContent::cast(token).unwrap())
+                }
+                NodeOrToken::Node(node) => {
+                    InterpolPart::Interpolation(ast::Interpol::cast(node).unwrap())
+                }
+            })
     }
 }
 

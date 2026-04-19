@@ -11,9 +11,11 @@ use crate::{
 
 #[test]
 fn interpolation() {
-    let root = ast::Root::parse(include_str!("../test_data/parser/success/interpolation.nix"))
-        .ok()
-        .unwrap();
+    let root = ast::Root::parse(include_str!(
+        "../test_data/parser/success/interpolation.nix"
+    ))
+    .ok()
+    .unwrap();
     let let_in = ast::LetIn::try_from(root.expr().unwrap()).unwrap();
     let set = ast::AttrSet::try_from(let_in.body().unwrap()).unwrap();
     let entry = set.entries().nth(1).unwrap();
@@ -40,8 +42,9 @@ fn interpolation() {
 
 #[test]
 fn inherit() {
-    let root =
-        ast::Root::parse(include_str!("../test_data/parser/success/inherit.nix")).ok().unwrap();
+    let root = ast::Root::parse(include_str!("../test_data/parser/success/inherit.nix"))
+        .ok()
+        .unwrap();
     let let_in = ast::LetIn::try_from(root.expr().unwrap()).unwrap();
     let set = ast::AttrSet::try_from(let_in.body().unwrap()).unwrap();
     let inherit = set.inherits().nth(1).unwrap();
@@ -57,7 +60,9 @@ fn inherit() {
 
 #[test]
 fn math() {
-    let root = ast::Root::parse(include_str!("../test_data/parser/success/math.nix")).ok().unwrap();
+    let root = ast::Root::parse(include_str!("../test_data/parser/success/math.nix"))
+        .ok()
+        .unwrap();
     let op1 = ast::BinOp::try_from(root.expr().unwrap()).unwrap();
     let op2 = ast::BinOp::try_from(op1.lhs().unwrap()).unwrap();
     assert_eq!(op1.operator().unwrap(), ast::BinOpKind::Add);
@@ -79,11 +84,16 @@ fn dir_tests<F>(dir: &str, get_actual: F)
 where
     F: Fn(String) -> String,
 {
-    let base_path: PathBuf = [env!("CARGO_MANIFEST_DIR"), "test_data", dir].iter().collect();
+    let base_path: PathBuf = [env!("CARGO_MANIFEST_DIR"), "test_data", dir]
+        .iter()
+        .collect();
     let success_path = base_path.join("success");
     let error_path = base_path.join("error");
 
-    let entries = success_path.read_dir().unwrap().chain(error_path.read_dir().unwrap());
+    let entries = success_path
+        .read_dir()
+        .unwrap()
+        .chain(error_path.read_dir().unwrap());
 
     for entry in entries {
         let path = entry.unwrap().path();

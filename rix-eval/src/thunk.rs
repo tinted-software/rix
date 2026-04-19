@@ -87,6 +87,21 @@ impl Thunk {
         }
     }
 
+    /// Create a new thunk from expression text
+    pub fn new_from_text(
+        expression_text: String,
+        closure: VariableScope,
+        file_id: Option<FileId>,
+    ) -> Self {
+        Self {
+            expression_text,
+            closure,
+            file_id,
+            state: Arc::new(Mutex::new(ThunkState::Suspended)),
+            cached_value: Arc::new(Mutex::new(None)),
+        }
+    }
+
     /// Get the expression text stored in this thunk
     ///
     /// This is a temporary solution. In a full implementation, we'd return

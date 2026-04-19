@@ -154,7 +154,8 @@ where
         self.builder.checkpoint()
     }
     fn start_node_at(&mut self, checkpoint: Checkpoint, kind: SyntaxKind) {
-        self.builder.start_node_at(checkpoint, NixLanguage::kind_to_raw(kind));
+        self.builder
+            .start_node_at(checkpoint, NixLanguage::kind_to_raw(kind));
     }
     fn finish_node(&mut self) {
         self.builder.finish_node();
@@ -188,7 +189,11 @@ where
         self.builder.token(NixLanguage::kind_to_raw(token), s)
     }
     fn peek(&mut self) -> Option<SyntaxKind> {
-        while self.peek_raw().map(|&(t, _)| t.is_trivia()).unwrap_or(false) {
+        while self
+            .peek_raw()
+            .map(|&(t, _)| t.is_trivia())
+            .unwrap_or(false)
+        {
             self.bump();
         }
         self.peek_ahead(0)
@@ -220,7 +225,11 @@ where
                 let start = self.start_error_node();
                 loop {
                     self.bump();
-                    if self.peek().map(|kind| allowed.contains(kind)).unwrap_or(true) {
+                    if self
+                        .peek()
+                        .map(|kind| allowed.contains(kind))
+                        .unwrap_or(true)
+                    {
                         break;
                     }
                 }
@@ -235,8 +244,9 @@ where
             }
         };
         if next.is_none() {
-            self.errors
-                .push(ParseError::UnexpectedEOFWanted(allowed_slice.to_vec().into_boxed_slice()));
+            self.errors.push(ParseError::UnexpectedEOFWanted(
+                allowed_slice.to_vec().into_boxed_slice(),
+            ));
         }
         next
     }
@@ -257,7 +267,11 @@ where
     fn parse_dynamic(&mut self) {
         self.start_node(NODE_DYNAMIC);
         self.bump();
-        while self.peek().map(|t| t != TOKEN_INTERPOL_END).unwrap_or(false) {
+        while self
+            .peek()
+            .map(|t| t != TOKEN_INTERPOL_END)
+            .unwrap_or(false)
+        {
             self.parse_expr();
         }
         self.bump();
@@ -298,7 +312,10 @@ where
                 // NB: the tokenizer always emits TOKEN_IDENT for __curPos;
                 // TOKEN_CUR_POS is included for completeness but cannot
                 // currently be produced by the tokenizer.
-                if self.expect_peek_any(&[TOKEN_IDENT, TOKEN_OR, TOKEN_CUR_POS]).is_some() {
+                if self
+                    .expect_peek_any(&[TOKEN_IDENT, TOKEN_OR, TOKEN_CUR_POS])
+                    .is_some()
+                {
                     self.start_node(NODE_IDENT);
                     let (_, s) = self.try_next().unwrap();
                     self.manual_bump(s, TOKEN_IDENT);
@@ -365,7 +382,8 @@ where
             self.expect_ident();
             let end = self.finish_error_node();
             if bound {
-                self.errors.push(ParseError::UnexpectedDoubleBind(TextRange::new(start, end)));
+                self.errors
+                    .push(ParseError::UnexpectedDoubleBind(TextRange::new(start, end)));
             }
         }
     }
@@ -575,9 +593,16 @@ where
                 self.errors.push(ParseError::UnexpectedWanted(
                     kind,
                     TextRange::new(start, end),
-                    [T!['('], T![rec], T!['{'], T!['['], TOKEN_STRING_START, TOKEN_IDENT]
-                        .to_vec()
-                        .into_boxed_slice(),
+                    [
+                        T!['('],
+                        T![rec],
+                        T!['{'],
+                        T!['['],
+                        TOKEN_STRING_START,
+                        TOKEN_IDENT,
+                    ]
+                    .to_vec()
+                    .into_boxed_slice(),
                 ));
             }
         };
@@ -804,7 +829,9 @@ where
     I: Iterator<Item = Token<'s>>,
 {
     let mut parser = Parser::new(iter);
-    parser.builder.start_node(NixLanguage::kind_to_raw(NODE_ROOT));
+    parser
+        .builder
+        .start_node(NixLanguage::kind_to_raw(NODE_ROOT));
     parser.parse_expr();
     parser.eat_trivia();
     if parser.peek().is_some() {
@@ -813,7 +840,9 @@ where
             parser.bump();
         }
         let end = parser.finish_error_node();
-        parser.errors.push(ParseError::UnexpectedExtra(TextRange::new(start, end)));
+        parser
+            .errors
+            .push(ParseError::UnexpectedExtra(TextRange::new(start, end)));
         parser.eat_trivia();
     }
     parser.builder.finish_node();

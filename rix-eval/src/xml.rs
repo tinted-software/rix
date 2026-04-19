@@ -1,7 +1,7 @@
 use crate::function::Parameter;
 use crate::{Evaluator, NixValue, Result};
-use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::Writer;
+use quick_xml::events::{BytesEnd, BytesStart, Event};
 use std::io::{Cursor, Write};
 
 pub fn to_xml(value: &NixValue, evaluator: &Evaluator) -> Result<String> {
@@ -32,14 +32,14 @@ pub fn to_xml(value: &NixValue, evaluator: &Evaluator) -> Result<String> {
         })?;
 
     let mut result = String::from_utf8(writer.into_inner().into_inner()).unwrap();
-    
+
     // Nix format has a space before self-closing tags: <int value="10" />
     // quick-xml produces <int value="10"/>
     result = result.replace("/>", " />");
-    
+
     // Add trailing newline to match expectation
     result.push('\n');
-    
+
     Ok(result)
 }
 
@@ -107,7 +107,9 @@ fn serialize_value<W: std::io::Write>(
                 let val = attrs.get(key).unwrap();
                 let mut attr_elem = BytesStart::new("attr");
                 attr_elem.push_attribute(("name", key.as_str()));
-                writer.write_event(Event::Start(attr_elem)).map_err(xml_err)?;
+                writer
+                    .write_event(Event::Start(attr_elem))
+                    .map_err(xml_err)?;
                 serialize_value(val, evaluator, writer)?;
                 writer
                     .write_event(Event::End(BytesEnd::new("attr")))
@@ -141,10 +143,10 @@ fn serialize_value<W: std::io::Write>(
                     }
                     writer.write_event(Event::Start(elem)).map_err(xml_err)?;
                     let mut sorted_entries = entries.clone();
-                    sorted_entries.sort();
-                    for entry in sorted_entries {
+                    sorted_entries.sort_by(|a, b| a.0.cmp(&b.0));
+                    for (entry_name, _) in sorted_entries {
                         let mut entry_elem = BytesStart::new("attr");
-                        entry_elem.push_attribute(("name", entry.as_str()));
+                        entry_elem.push_attribute(("name", entry_name.as_str()));
                         writer
                             .write_event(Event::Empty(entry_elem))
                             .map_err(xml_err)?;
@@ -154,6 +156,17 @@ fn serialize_value<W: std::io::Write>(
                         .map_err(xml_err)?;
                 }
             }
+            writer
+                .write_event(Event::End(BytesEnd::new("function")))
+                .map_err(xml_err)?;
+        }
+        NixValue::Builtin(_) => {
+            writer
+                .write_event(Event::Start(BytesStart::new("function")))
+                .map_err(xml_err)?;
+            let mut elem = BytesStart::new("varpat");
+            elem.push_attribute(("name", "x"));
+            writer.write_event(Event::Empty(elem)).map_err(xml_err)?;
             writer
                 .write_event(Event::End(BytesEnd::new("function")))
                 .map_err(xml_err)?;

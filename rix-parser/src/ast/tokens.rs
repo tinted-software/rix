@@ -52,7 +52,11 @@ impl Comment {
         // Handle both "#..." and "/*...*/" comments.
         match text.strip_prefix('#') {
             Some(s) => s,
-            None => text.strip_prefix(r#"/*"#).unwrap().strip_suffix(r#"*/"#).unwrap(),
+            None => text
+                .strip_prefix(r#"/*"#)
+                .unwrap()
+                .strip_suffix(r#"*/"#)
+                .unwrap(),
         }
     }
 }

@@ -47,7 +47,11 @@ pub use ast::Root;
 impl Root {
     pub fn parse(s: &str) -> Parse<Root> {
         let (green, errors) = parser::parse(Tokenizer::new(s));
-        Parse { green, errors, _ty: PhantomData }
+        Parse {
+            green,
+            errors,
+            _ty: PhantomData,
+        }
     }
 }
 

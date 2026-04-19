@@ -11,7 +11,8 @@ use rix_parser::ast::{Expr, Root};
 use rix_parser::parser::parse;
 use rix_parser::tokenizer::tokenize;
 use rowan::ast::AstNode;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 /// A Nix function (closure)
 ///
@@ -38,7 +39,7 @@ pub enum Parameter {
     Simple(String),
     Pattern {
         name: Option<String>,
-        entries: Vec<String>,
+        entries: Vec<(String, Option<String>)>, // Name and optional default expression text
         ellipsis: bool,
     },
 }
@@ -57,11 +58,14 @@ impl std::fmt::Display for Parameter {
                     write!(f, "{} @ ", n)?;
                 }
                 write!(f, "{{ ")?;
-                for entry in entries {
+                for (entry, default) in entries {
                     if !first {
                         write!(f, ", ")?;
                     }
                     write!(f, "{}", entry)?;
+                    if let Some(def) = default {
+                        write!(f, " ? {}", def)?;
+                    }
                     first = false;
                 }
                 if *ellipsis {
@@ -187,7 +191,7 @@ impl Function {
         let mut closure = VariableScope::new();
         closure.insert(
             format!("__builtin_{}", builtin_name),
-            NixValue::String(format!("__builtin_func:{}", builtin_name)),
+            NixValue::Builtin(builtin_name.clone()),
         );
         closure.insert("__curried_first_arg".to_string(), first_arg);
 
@@ -208,7 +212,8 @@ impl Function {
         args: Vec<NixValue>,
         file_id: Option<FileId>,
     ) -> Self {
-        let parameter = Parameter::Simple(format!("__curried_{}_arg{}", builtin_name, args.len() + 1));
+        let parameter =
+            Parameter::Simple(format!("__curried_{}_arg{}", builtin_name, args.len() + 1));
         let _body_text = format!("__curried_builtin_call:{}", builtin_name);
 
         let mut closure = VariableScope::new();
@@ -334,8 +339,8 @@ impl Function {
                 let op_value = op.clone().force(evaluator)?;
                 let (op_func_opt, builtin_name_opt) = match op_value {
                     NixValue::Function(f) => (Some(f), None),
-                    NixValue::String(ref s) if s.starts_with("__builtin_func:") => {
-                        let builtin_name = &s[15..];
+                    NixValue::Builtin(ref name) => {
+                        let builtin_name = name;
                         if evaluator.get_builtin(builtin_name).is_some() {
                             (None, Some(builtin_name.to_string()))
                         } else {
@@ -405,76 +410,73 @@ impl Function {
 
             // Get the builtin and collected arguments from closure
             if let Some(builtin_marker) = self.closure.get(&format!("__builtin_{}", builtin_name)) {
-                if let NixValue::String(marker) = builtin_marker {
-                    if marker.starts_with("__builtin_func:") {
-                        if let Some(builtin) = evaluator.get_builtin(builtin_name) {
-                            // Collect all arguments from closure
-                            let mut args = Vec::new();
+                if let NixValue::Builtin(_) = builtin_marker {
+                    if let Some(builtin) = evaluator.get_builtin(builtin_name) {
+                        // Collect all arguments from closure
+                        let mut args = Vec::new();
 
-                            // Check if we have __curried_first_arg (old style) or __curried_arg1, __curried_arg2, etc. (new style)
-                            if let Some(first_arg) = self.closure.get("__curried_first_arg") {
-                                // Old style: single argument - force thunks before collecting
-                                let first_arg_forced = first_arg.clone().force(evaluator)?;
-                                args.push(first_arg_forced);
-                                let arg_forced = argument.clone().force(evaluator)?;
-                                args.push(arg_forced);
-                            } else {
-                                // New style: multiple arguments - force thunks before collecting
-                                let arg_count = self
-                                    .closure
-                                    .get("__curried_arg_count")
-                                    .and_then(|v| match v {
-                                        NixValue::Integer(n) => Some(n as usize),
-                                        _ => None,
-                                    })
-                                    .unwrap_or(0);
+                        // Check if we have __curried_first_arg (old style) or __curried_arg1, __curried_arg2, etc. (new style)
+                        if let Some(first_arg) = self.closure.get("__curried_first_arg") {
+                            // Old style: single argument - force thunks before collecting
+                            let first_arg_forced = first_arg.clone().force(evaluator)?;
+                            args.push(first_arg_forced);
+                            let arg_forced = argument.clone().force(evaluator)?;
+                            args.push(arg_forced);
+                        } else {
+                            // New style: multiple arguments - force thunks before collecting
+                            let arg_count = self
+                                .closure
+                                .get("__curried_arg_count")
+                                .and_then(|v| match v {
+                                    NixValue::Integer(n) => Some(n as usize),
+                                    _ => None,
+                                })
+                                .unwrap_or(0);
 
-                                for i in 1..=arg_count {
-                                    if let Some(arg) =
-                                        self.closure.get(&format!("__curried_arg{}", i))
-                                    {
-                                        let arg_forced = arg.clone().force(evaluator)?;
-                                        args.push(arg_forced);
-                                    }
-                                }
-                                let arg_forced = argument.clone().force(evaluator)?;
-                                args.push(arg_forced);
-                            }
-
-                            match builtin.call_with_evaluator(&args, evaluator) {
-                                Ok(result) => return Ok(result),
-                                Err(Error::UnsupportedExpression { reason })
-                                    if reason.contains("takes") && reason.contains("arguments") =>
+                            for i in 1..=arg_count {
+                                if let Some(arg) = self.closure.get(&format!("__curried_arg{}", i))
                                 {
-                                    // Still needs more arguments - create another curried function
-                                    let file_id = evaluator.current_file_id();
-                                    let mut closure = VariableScope::new();
-                                    closure.insert(
-                                        format!("__builtin_{}", builtin_name),
-                                        NixValue::String(format!(
-                                            "__builtin_func:{}",
-                                            builtin_name
-                                        )),
-                                    );
-                                    for (i, arg) in args.iter().enumerate() {
-                                        closure
-                                            .insert(format!("__curried_arg{}", i + 1), arg.clone());
-                                    }
-                                    closure.insert(
-                                        "__curried_arg_count".to_string(),
-                                        NixValue::Integer(args.len() as i64),
-                                    );
-
-                                    let next_curried = Function::new_curried_builtin_internal(
-                                        Parameter::Simple(format!("__curried_{}_arg{}", builtin_name, args.len() + 1)),
-                                        format!("__curried_builtin_call:{}", builtin_name),
-                                        closure,
-                                        file_id,
-                                    );
-                                    return Ok(NixValue::Function(Arc::new(next_curried)));
+                                    let arg_forced = arg.clone().force(evaluator)?;
+                                    args.push(arg_forced);
                                 }
-                                Err(e) => return Err(e),
                             }
+                            let arg_forced = argument.clone().force(evaluator)?;
+                            args.push(arg_forced);
+                        }
+
+                        match builtin.call_with_evaluator(&args, evaluator) {
+                            Ok(result) => return Ok(result),
+                            Err(Error::UnsupportedExpression { reason })
+                                if reason.contains("takes") && reason.contains("arguments") =>
+                            {
+                                // Still needs more arguments - create another curried function
+                                let file_id = evaluator.current_file_id();
+                                let mut closure = VariableScope::new();
+                                closure.insert(
+                                    format!("__builtin_{}", builtin_name),
+                                    NixValue::Builtin(builtin_name.to_string()),
+                                );
+                                for (i, arg) in args.iter().enumerate() {
+                                    closure.insert(format!("__curried_arg{}", i + 1), arg.clone());
+                                }
+                                closure.insert(
+                                    "__curried_arg_count".to_string(),
+                                    NixValue::Integer(args.len() as i64),
+                                );
+
+                                let next_curried = Function::new_curried_builtin_internal(
+                                    Parameter::Simple(format!(
+                                        "__curried_{}_arg{}",
+                                        builtin_name,
+                                        args.len() + 1
+                                    )),
+                                    format!("__curried_builtin_call:{}", builtin_name),
+                                    closure,
+                                    file_id,
+                                );
+                                return Ok(NixValue::Function(Arc::new(next_curried)));
+                            }
+                            Err(e) => return Err(e),
                         }
                     }
                 }
@@ -484,6 +486,7 @@ impl Function {
         // Create a new scope that merges the closure with the argument binding
         // The parameter shadows any variable with the same name in the closure
         let mut scope = self.closure.clone();
+        scope.push_lexical();
         match &self.parameter {
             Parameter::Simple(name) => {
                 scope.insert(name.clone(), argument);
@@ -491,21 +494,87 @@ impl Function {
             Parameter::Pattern {
                 name,
                 entries,
-                ellipsis: _,
+                ellipsis,
             } => {
                 // If it's a pattern, we need to bind the entries
-                // This is a simplified implementation - in a real evaluator,
-                // we'd need to handle default values and matching correctly.
-                // For now, assume the argument is an attribute set.
-                if let NixValue::AttributeSet(attrs) = argument.clone().force(evaluator)? {
-                    for entry in entries {
-                        if let Some(val) = attrs.get(entry) {
-                            scope.insert(entry.clone(), val.clone());
+                let arg_forced = argument.clone().force(evaluator)?;
+                let attrs = match arg_forced {
+                    NixValue::AttributeSet(a) => a,
+                    _ => {
+                        return Err(Error::UnsupportedExpression {
+                            reason: format!(
+                                "function expected attribute set as argument, got {}",
+                                arg_forced
+                            ),
+                        });
+                    }
+                };
+
+                // Create a shared recursive map for the arguments
+                // This allows default expressions to refer to other arguments in the same pattern
+                let mut arg_bindings = HashMap::new();
+                let shared_arg_map = Arc::new(Mutex::new(HashMap::new()));
+
+                // Create a recursive scope that includes these arguments
+                let mut rec_scope = self.closure.clone();
+                rec_scope.push_recursive(shared_arg_map.clone());
+
+                // Handle the @ name if it exists
+                if let Some(n) = name {
+                    arg_bindings.insert(n.clone(), argument.clone());
+                    shared_arg_map
+                        .lock()
+                        .unwrap()
+                        .insert(n.clone(), argument.clone());
+                }
+
+                for (entry_name, default_text) in entries {
+                    if let Some(val) = attrs.get(entry_name) {
+                        arg_bindings.insert(entry_name.clone(), val.clone());
+                    } else if let Some(text) = default_text {
+                        // Use default value (evaluated lazily in the recursive scope)
+                        let thunk = crate::thunk::Thunk::new_from_text(
+                            text.clone(),
+                            rec_scope.clone(),
+                            self.file_id,
+                        );
+                        arg_bindings.insert(entry_name.clone(), NixValue::Thunk(Arc::new(thunk)));
+                    } else if !ellipsis {
+                        // Missing required argument and no ellipsis
+                        return Err(Error::UnsupportedExpression {
+                            reason: format!(
+                                "function expected argument '{}' but it was not provided",
+                                entry_name
+                            ),
+                        });
+                    }
+                }
+
+                // Check for unexpected arguments if no ellipsis
+                if !ellipsis {
+                    for entry_name in attrs.keys() {
+                        if !entries.iter().any(|(n, _)| n == entry_name) {
+                            return Err(Error::UnsupportedExpression {
+                                reason: format!(
+                                    "function called with unexpected argument '{}'",
+                                    entry_name
+                                ),
+                            });
                         }
                     }
-                    if let Some(name) = name {
-                        scope.insert(name.clone(), argument);
+                }
+
+                // Update shared_arg_map for recursion and merge into scope
+                {
+                    let mut map = shared_arg_map.lock().unwrap();
+                    for (k, v) in &arg_bindings {
+                        map.insert(k.clone(), v.clone());
+                        scope.insert(k.clone(), v.clone());
                     }
+                }
+
+                if let Some(name) = name {
+                    scope.insert(name.clone(), argument);
                 }
             }
         }

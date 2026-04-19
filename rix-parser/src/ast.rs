@@ -66,6 +66,9 @@ mod support {
     }
 
     pub(super) fn children_tokens_u<N: AstNode>(parent: &N) -> impl Iterator<Item = SyntaxToken> {
-        parent.syntax().children_with_tokens().filter_map(SyntaxElement::into_token)
+        parent
+            .syntax()
+            .children_with_tokens()
+            .filter_map(SyntaxElement::into_token)
     }
 }

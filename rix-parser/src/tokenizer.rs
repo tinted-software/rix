@@ -59,7 +59,10 @@ pub struct Tokenizer<'a> {
 
 impl<'a> Tokenizer<'a> {
     pub fn new(input: &'a str) -> Self {
-        Self { ctx: Vec::new(), state: State { input, offset: 0 } }
+        Self {
+            ctx: Vec::new(),
+            state: State { input, offset: 0 },
+        }
     }
 }
 
@@ -105,8 +108,12 @@ impl Tokenizer<'_> {
     where
         F: FnMut(char) -> bool,
     {
-        let len: usize =
-            self.remaining().chars().take_while(|&c| f(c)).map(|c| c.len_utf8()).sum::<usize>();
+        let len: usize = self
+            .remaining()
+            .chars()
+            .take_while(|&c| f(c))
+            .map(|c| c.len_utf8())
+            .sum::<usize>();
         self.state.offset += len;
         len
     }
@@ -236,7 +243,11 @@ impl Tokenizer<'_> {
                         }
                         _ => false,
                     };
-                    return Some(if status { TOKEN_STRING_END } else { TOKEN_ERROR });
+                    return Some(if status {
+                        TOKEN_STRING_END
+                    } else {
+                        TOKEN_ERROR
+                    });
                 }
                 _ => (),
             }
@@ -376,7 +387,11 @@ impl Tokenizer<'_> {
             }
             '<' if kind == Some(IdentType::Store) => {
                 self.consume(is_valid_path_char);
-                if self.next() != Some('>') { TOKEN_ERROR } else { TOKEN_PATH }
+                if self.next() != Some('>') {
+                    TOKEN_ERROR
+                } else {
+                    TOKEN_PATH
+                }
             }
             '&' if self.peek() == Some('&') => {
                 self.next().unwrap();
@@ -487,6 +502,7 @@ impl<'a> Iterator for Tokenizer<'a> {
     type Item = Token<'a>;
     fn next(&mut self) -> Option<Self::Item> {
         let start = self.state;
-        self.next_inner().map(|syntax_kind| (syntax_kind, self.str_since(start)))
+        self.next_inner()
+            .map(|syntax_kind| (syntax_kind, self.str_since(start)))
     }
 }

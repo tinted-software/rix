@@ -281,7 +281,43 @@ impl Evaluator {
         path_expr: &rix_parser::ast::Path,
         _scope: &VariableScope,
     ) -> Result<NixValue> {
-        Ok(NixValue::Path(PathBuf::from(path_expr.to_string())))
+        let path_str = path_expr.to_string();
+
+        // Handle search paths like <nixpkgs>
+        if path_str.starts_with('<') && path_str.ends_with('>') {
+            let content = &path_str[1..path_str.len() - 1];
+            let (name, subpath) = match content.find('/') {
+                Some(idx) => (&content[0..idx], Some(&content[idx + 1..])),
+                None => (content, None),
+            };
+
+            if let Some(base_path) = self.search_paths.get(name) {
+                let mut resolved = base_path.clone();
+                if let Some(sub) = subpath {
+                    resolved.push(sub);
+                }
+                return Ok(NixValue::Path(resolved));
+            } else {
+                return Err(Error::UnsupportedExpression {
+                    reason: format!("search path '{}' not found", name),
+                });
+            }
+        }
+
+        let path = PathBuf::from(&path_str);
+
+        if path.is_absolute() {
+            return Ok(NixValue::Path(path));
+        }
+
+        // If it's a relative path (starts with . or .. or is just a name),
+        // resolve it relative to the directory of the current file.
+        if let Some(mut current_file) = self.current_file_path() {
+            current_file.pop(); // Remove filename to get directory
+            return Ok(NixValue::Path(current_file.join(path)));
+        }
+
+        Ok(NixValue::Path(path))
     }
 
     pub(crate) fn evaluate_paren(

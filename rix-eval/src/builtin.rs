@@ -52,8 +52,12 @@ pub trait Builtin: Send + Sync {
     fn call_with_evaluator(
         &self,
         args: &[NixValue],
-        _evaluator: &crate::eval::Evaluator,
+        evaluator: &crate::eval::Evaluator,
     ) -> Result<NixValue> {
-        self.call(args)
+        let mut forced_args = Vec::with_capacity(args.len());
+        for arg in args {
+            forced_args.push(arg.clone().force(evaluator)?);
+        }
+        self.call(&forced_args)
     }
 }
