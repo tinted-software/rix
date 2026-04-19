@@ -2131,9 +2131,9 @@ fn serialize_nix_value_to_json(value: &NixValue, evaluator: &Evaluator) -> Resul
         NixValue::Boolean(b) => Ok(b.to_string()),
         NixValue::Integer(i) => Ok(i.to_string()),
         NixValue::Float(f) => Ok(f.to_string()),
-        NixValue::String(s) => Ok(format!("\"{}\"", json_escape(&s))),
-        NixValue::Path(p) => Ok(format!("\"{}\"", json_escape(&p.to_string_lossy()))),
-        NixValue::StorePath(p) => Ok(format!("\"{}\"", json_escape(&p))),
+        NixValue::String(s) => Ok(serde_json::to_string(&s).unwrap()),
+        NixValue::Path(p) => Ok(serde_json::to_string(&p.to_string_lossy()).unwrap()),
+        NixValue::StorePath(p) => Ok(serde_json::to_string(&p).unwrap()),
         NixValue::List(l) => {
             let mut parts = Vec::new();
             for item in l {
@@ -2151,7 +2151,7 @@ fn serialize_nix_value_to_json(value: &NixValue, evaluator: &Evaluator) -> Resul
                     let result = func.apply(evaluator, NixValue::AttributeSet(attrs_copy))?;
                     let result_forced = result.force(evaluator)?;
                     if let NixValue::String(s) = result_forced {
-                        return Ok(format!("\"{}\"", json_escape(&s)));
+                        return Ok(serde_json::to_string(&s).unwrap());
                     }
                 }
             }
@@ -2162,7 +2162,7 @@ fn serialize_nix_value_to_json(value: &NixValue, evaluator: &Evaluator) -> Resul
             for key in keys {
                 let val = attrs.get(key).unwrap();
                 let json_val = serialize_nix_value_to_json(val, evaluator)?;
-                parts.push(format!("\"{}\":{}", json_escape(key), json_val));
+                parts.push(format!("{}:{}", serde_json::to_string(key).unwrap(), json_val));
             }
             Ok(format!("{{{}}}", parts.join(",")))
         }
@@ -2175,14 +2175,6 @@ fn serialize_nix_value_to_json(value: &NixValue, evaluator: &Evaluator) -> Resul
             reason: format!("cannot convert {} to JSON", forced),
         }),
     }
-}
-
-fn json_escape(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
 }
 
 /// ToXML builtin - converts a value to an XML string
@@ -2854,66 +2846,64 @@ impl Builtin for SubstringBuiltin {
         "substring"
     }
 
-    fn call(&self, args: &[NixValue]) -> Result<NixValue> {
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
         if args.len() != 3 {
             return Err(Error::UnsupportedExpression {
                 reason: format!("substring takes 3 arguments, got {}", args.len()),
             });
         }
 
-        let start = match &args[0] {
-            NixValue::Integer(i) => *i,
-            _ => {
+        let start = match args[0].clone().force(evaluator)? {
+            NixValue::Integer(i) => i,
+            v => {
                 return Err(Error::UnsupportedExpression {
-                    reason: format!(
-                        "substring: first argument must be an integer, got {}",
-                        args[0]
-                    ),
+                    reason: format!("substring: first argument must be an integer, got {}", v),
                 });
             }
         };
 
-        let len = match &args[1] {
-            NixValue::Integer(i) => *i,
-            _ => {
+        let len = match args[1].clone().force(evaluator)? {
+            NixValue::Integer(i) => i,
+            v => {
                 return Err(Error::UnsupportedExpression {
-                    reason: format!(
-                        "substring: second argument must be an integer, got {}",
-                        args[1]
-                    ),
+                    reason: format!("substring: second argument must be an integer, got {}", v),
                 });
             }
         };
 
-        let s = match &args[2] {
+        let s = match args[2].clone().force(evaluator)? {
             NixValue::String(s) => s,
-            _ => {
+            v => {
                 return Err(Error::UnsupportedExpression {
-                    reason: format!(
-                        "substring: third argument must be a string, got {}",
-                        args[2]
-                    ),
+                    reason: format!("substring: third argument must be a string, got {}", v),
                 });
             }
         };
 
-        // Handle negative length (Nix allows this)
-        let actual_len = if len < 0 {
-            s.len().saturating_sub(start.max(0) as usize)
-        } else {
-            len.max(0) as usize
-        };
-
-        let start_idx = start.max(0) as usize;
-
-        // If start is beyond the string length, return empty string
-        if start_idx >= s.len() {
-            return Ok(NixValue::String(String::new()));
+        if start < 0 {
+            return Ok(NixValue::String("".to_string()));
         }
 
-        let end_idx = (start_idx + actual_len).min(s.len());
+        let start = start as usize;
+        let s_chars: Vec<char> = s.chars().collect();
 
-        Ok(NixValue::String(s[start_idx..end_idx].to_string()))
+        if start >= s_chars.len() {
+            return Ok(NixValue::String("".to_string()));
+        }
+
+        let end = if len < 0 {
+            s_chars.len()
+        } else {
+            std::cmp::min(start + len as usize, s_chars.len())
+        };
+
+        Ok(NixValue::String(s_chars[start..end].iter().collect()))
+    }
+
+    fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
+        Err(Error::UnsupportedExpression {
+            reason: "substring requires evaluator context".to_string(),
+        })
     }
 }
 
@@ -3242,36 +3232,31 @@ impl Builtin for SplitVersionBuiltin {
         "splitVersion"
     }
 
-    fn call(&self, args: &[NixValue]) -> Result<NixValue> {
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
         if args.len() != 1 {
             return Err(Error::UnsupportedExpression {
                 reason: format!("splitVersion takes 1 argument, got {}", args.len()),
             });
         }
 
-        let version = match &args[0] {
+        let version = match args[0].clone().force(evaluator)? {
             NixValue::String(s) => s,
-            _ => {
+            v => {
                 return Err(Error::UnsupportedExpression {
-                    reason: format!("splitVersion expects a string, got {}", args[0]),
+                    reason: format!("splitVersion expects a string, got {}", v),
                 });
             }
         };
 
-        // Split version string into components
-        // Nix splits on non-alphanumeric characters, keeping separators as separate elements
         let mut result = Vec::new();
         let mut current = String::new();
 
         for ch in version.chars() {
             if ch.is_alphanumeric() {
                 current.push(ch);
-            } else {
-                if !current.is_empty() {
-                    result.push(NixValue::String(current.clone()));
-                    current.clear();
-                }
-                result.push(NixValue::String(ch.to_string()));
+            } else if !current.is_empty() {
+                result.push(NixValue::String(current.clone()));
+                current.clear();
             }
         }
 
@@ -3280,6 +3265,12 @@ impl Builtin for SplitVersionBuiltin {
         }
 
         Ok(NixValue::List(result))
+    }
+
+    fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
+        Err(Error::UnsupportedExpression {
+            reason: "splitVersion requires evaluator context".to_string(),
+        })
     }
 }
 
