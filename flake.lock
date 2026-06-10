@@ -1,0 +1,26 @@
+{
+  "nodes": {
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1781046556,
+        "narHash": "sha256-5VFmgqlzXKT8VTPaNxW+9hWKYFG/ZJDhOkT+7NpVWk8=",
+        "owner": "tinted-software",
+        "repo": "nixpkgs",
+        "rev": "c5d4d049ace4251f8296d0486532d70a9d6a62e8",
+        "type": "github"
+      },
+      "original": {
+        "owner": "tinted-software",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "nixpkgs": "nixpkgs"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}
