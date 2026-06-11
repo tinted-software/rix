@@ -13,8 +13,9 @@ use rowan::ast::AstNode;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::rc::Rc;
-const MAX_RECURSION_DEPTH: usize = 1000;
+const MAX_RECURSION_DEPTH: usize = 100000;
 
 pub struct Evaluator {
     /// Map of builtin function names to their implementations
@@ -658,6 +659,172 @@ impl Evaluator {
         let result = self.evaluate_expr_with_scope_impl_inner(expr, scope);
         self.decrement_recursion_depth();
         result
+    }
+
+    /// Evaluate an expression in tail position, with TCO support.
+    /// Returns either a final value, or a TailCall descriptor when the body
+    /// ends with a function application that should be trampolined.
+    pub(crate) fn evaluate_expr_with_tco(
+        &self,
+        expr: &Expr,
+        scope: &VariableScope,
+    ) -> Result<crate::function::TcoResult> {
+        self.increment_recursion_depth()?;
+        let result = self.evaluate_expr_with_tco_inner(expr, scope);
+        self.decrement_recursion_depth();
+        result
+    }
+
+    fn evaluate_expr_with_tco_inner(
+        &self,
+        expr: &Expr,
+        scope: &VariableScope,
+    ) -> Result<crate::function::TcoResult> {
+        match expr {
+            Expr::Apply(apply) => {
+                // In tail position, an Apply is the tail call itself.
+                // Return it as a TailCall for the trampoline to handle.
+                let func_expr = apply.lambda().ok_or_else(|| Error::UnsupportedExpression {
+                    reason: "TCO: function application missing function".to_string(),
+                })?;
+                let arg_expr = apply.argument().ok_or_else(|| Error::UnsupportedExpression {
+                    reason: "TCO: function application missing argument".to_string(),
+                })?;
+
+                // Evaluate the function expression.
+                // Special handling: if the function expression is an identifier
+                // that resolves to a thunk, try to create a Function value from
+                // the thunk's data without forcing (avoids recursive forcing).
+                let func_value = self.resolve_function_for_tco(&func_expr, scope)?;
+
+                match func_value {
+                    NixValue::Function(func) => {
+                        // Don't force the argument here; let the trampoline handle it
+                        let file_id = self.current_file_id();
+                        let arg_thunk = NixValue::Thunk(Arc::new(crate::thunk::Thunk::new(
+                            &arg_expr,
+                            scope.clone(),
+                            file_id,
+                        )));
+                        Ok(crate::function::TcoResult::TailCall {
+                            func,
+                            arg: arg_thunk,
+                        })
+                    }
+                    other => {
+                        // Builtins and other callables: apply normally
+                        let file_id = self.current_file_id();
+                        let arg_thunk = NixValue::Thunk(Arc::new(crate::thunk::Thunk::new(
+                            &arg_expr,
+                            scope.clone(),
+                            file_id,
+                        )));
+                        let result = other.apply(self, arg_thunk)?;
+                        Ok(crate::function::TcoResult::Value(result))
+                    }
+                }
+            }
+            Expr::IfElse(if_else) => {
+                // Evaluate condition
+                let condition_expr =
+                    if_else
+                        .condition()
+                        .ok_or_else(|| Error::UnsupportedExpression {
+                            reason: "TCO: if missing condition".to_string(),
+                        })?;
+                let cond = self.evaluate_expr_with_scope(&condition_expr, scope)?;
+                let cond_forced = cond.force(self)?;
+                match cond_forced {
+                    NixValue::Boolean(true) => {
+                        let then_expr = if_else.body().ok_or_else(|| {
+                            Error::UnsupportedExpression {
+                                reason: "TCO: if missing then body".to_string(),
+                            }
+                        })?;
+                        self.evaluate_expr_with_tco_inner(&then_expr, scope)
+                    }
+                    NixValue::Boolean(false) => {
+                        let else_expr =
+                            if_else.else_body().ok_or_else(|| {
+                                Error::UnsupportedExpression {
+                                    reason: "TCO: if missing else body".to_string(),
+                                }
+                            })?;
+                        self.evaluate_expr_with_tco_inner(&else_expr, scope)
+                    }
+                    _ => Err(Error::UnsupportedExpression {
+                        reason: format!("if condition must be boolean, got {}", cond_forced),
+                    }),
+                }
+            }
+            Expr::Paren(paren) => {
+                if let Some(inner) = paren.expr() {
+                    self.evaluate_expr_with_tco_inner(&inner, scope)
+                } else {
+                    Ok(crate::function::TcoResult::Value(NixValue::Null))
+                }
+            }
+            // For all other expression types, evaluate normally and wrap as Value
+            _ => {
+                let result = self.evaluate_expr_with_scope_impl(expr, scope)?;
+                Ok(crate::function::TcoResult::Value(result))
+            }
+        }
+    }
+
+    /// Resolve a function expression for TCO, avoiding recursive thunk forcing.
+    /// If the expression resolves to a thunk containing a lambda, create a
+    /// Function value from it without forcing the thunk.
+    fn resolve_function_for_tco(
+        &self,
+        func_expr: &Expr,
+        scope: &VariableScope,
+    ) -> Result<NixValue> {
+        // First try to evaluate normally (this may force thunks)
+        let value = self.evaluate_expr_with_scope_impl(func_expr, scope)?;
+
+        // If it's already a function, return it
+        if matches!(value, NixValue::Function(_) | NixValue::Builtin(_)) {
+            return Ok(value);
+        }
+
+        // If it's a thunk, try to extract a function from it without forcing
+        if let NixValue::Thunk(thunk) = &value {
+            // Check if the thunk's expression text is a lambda
+            let tokens = tokenize(thunk.expression_text());
+            let (green_node, errors) = parse(tokens.into_iter());
+            if errors.is_empty() {
+                let syntax_node = SyntaxNode::new_root(green_node);
+                if let Some(root) = Root::cast(syntax_node.clone()) {
+                    if let Some(expr) = root.expr() {
+                        if let Expr::Lambda(lambda) = expr {
+                            // Extract parameter and body from the lambda
+                            if let Some(param_node) = lambda.param() {
+                                // param is a Param AST node - extract its text as parameter name
+                                let param_text = param_node.syntax().text().to_string();
+                                let parameter =
+                                    crate::function::Parameter::Simple(param_text);
+                                let body_text = lambda
+                                    .body()
+                                    .map(|b| b.syntax().text().to_string())
+                                    .unwrap_or_default();
+
+                                let func = crate::function::Function::new_curried_builtin_internal(
+                                    parameter,
+                                    body_text,
+                                    thunk.closure().clone(),
+                                    None,
+                                );
+                                return Ok(NixValue::Function(std::sync::Arc::new(func)));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fall back to the evaluated value
+        Ok(value)
     }
 
     fn evaluate_expr_with_scope_impl_inner(

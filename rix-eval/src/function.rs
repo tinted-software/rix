@@ -14,6 +14,15 @@ use rowan::ast::AstNode;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+/// Result of tail-call-optimized body evaluation
+#[derive(Debug, Clone)]
+pub enum TcoResult {
+    /// A final value (no tail call)
+    Value(NixValue),
+    /// A tail call that should be trampolined: (function, argument)
+    TailCall { func: Arc<Function>, arg: NixValue },
+}
+
 /// A Nix function (closure)
 ///
 /// Functions in Nix are closures that:
@@ -489,7 +498,7 @@ impl Function {
         scope.push_lexical();
         match &self.parameter {
             Parameter::Simple(name) => {
-                scope.insert(name.clone(), argument);
+                scope.insert(name.clone(), argument.clone());
             }
             Parameter::Pattern {
                 name,
@@ -574,39 +583,82 @@ impl Function {
                 }
 
                 if let Some(name) = name {
-                    scope.insert(name.clone(), argument);
+                    scope.insert(name.clone(), argument.clone());
                 }
             }
         }
 
-        // Parse the body expression text back into an AST node
-        let tokens = tokenize(&self.body_text);
-        let (green_node, errors) = parse(tokens.into_iter());
+        // Evaluate the body expression with TCO support using a trampoline loop
+        let mut current_func = std::sync::Arc::new(self.clone());
+        let mut current_arg = argument;
+        let mut current_scope = scope;
+        let mut current_file_id = self.file_id;
 
-        if !errors.is_empty() {
-            let error_msgs: Vec<String> = errors.iter().map(|e| format!("{:?}", e)).collect();
-            return Err(Error::ParseError {
-                reason: error_msgs.join(", "),
-            });
+        loop {
+            // Parse the body expression text back into an AST node
+            let tokens = tokenize(&current_func.body_text);
+            let (green_node, errors) = parse(tokens.into_iter());
+
+            if !errors.is_empty() {
+                let error_msgs: Vec<String> = errors.iter().map(|e| format!("{:?}", e)).collect();
+                return Err(Error::ParseError {
+                    reason: error_msgs.join(", "),
+                });
+            }
+
+            let syntax_node = SyntaxNode::new_root(green_node);
+            let root = Root::cast(syntax_node).ok_or(Error::AstConversionError)?;
+
+            let body_expr = root.expr().ok_or(Error::NoExpression)?;
+
+            // Push context with the function's file_id
+            evaluator.push_context(current_file_id, current_scope.clone());
+
+            // Evaluate the body expression with TCO support
+            let result = evaluator.evaluate_expr_with_tco(&body_expr, &current_scope);
+
+            // Pop context
+            evaluator.pop_context();
+
+            match result? {
+                TcoResult::Value(v) => return Ok(v),
+                TcoResult::TailCall { func, arg } => {
+                    // Force the argument to avoid building up a lazy thunk chain
+                    let arg_forced = arg.clone().force(evaluator)?;
+                    // Prepare for the next iteration:
+                    // Create new scope binding the tail-called function's parameter to the argument
+                    current_func = func;
+                    let mut new_scope = current_func.closure.clone();
+                    new_scope.push_lexical();
+                    match &current_func.parameter {
+                        Parameter::Simple(name) => {
+                            new_scope.insert(name.clone(), arg_forced);
+                        }
+                        Parameter::Pattern { .. } => {
+                            let attrs = match arg_forced {
+                                NixValue::AttributeSet(a) => a,
+                                _ => {
+                                    return Err(Error::UnsupportedExpression {
+                                        reason: "TCO: tail call argument must be an attribute set for pattern parameters".to_string(),
+                                    });
+                                }
+                            };
+                            for (entry_name, _) in &match &current_func.parameter {
+                                Parameter::Pattern { entries, .. } => entries.clone(),
+                                _ => vec![],
+                            } {
+                                if let Some(val) = attrs.get(entry_name) {
+                                    new_scope.insert(entry_name.clone(), val.clone());
+                                }
+                            }
+                        }
+                    }
+                    current_scope = new_scope;
+                    current_file_id = current_func.file_id;
+                    // Loop to evaluate the new function body
+                }
+            }
         }
-
-        let syntax_node = SyntaxNode::new_root(green_node);
-        let root = Root::cast(syntax_node).ok_or(Error::AstConversionError)?;
-
-        let body_expr = root.expr().ok_or(Error::NoExpression)?;
-
-        // Restore the file_id context when calling the function
-        // This is critical for relative imports within function bodies to work correctly
-        // Push context with the function's file_id
-        evaluator.push_context(self.file_id, scope.clone());
-
-        // Evaluate the body expression using the merged scope
-        let result = evaluator.evaluate_expr_with_scope(&body_expr, &scope);
-
-        // Pop context (restore previous context)
-        evaluator.pop_context();
-
-        result
     }
 }
 
