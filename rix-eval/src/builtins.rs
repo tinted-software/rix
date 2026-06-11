@@ -3191,6 +3191,11 @@ impl Builtin for SubstringBuiltin {
 
         let s = match args[2].clone().force(evaluator)? {
             NixValue::String(s) => s,
+            NixValue::Path(p) => p.to_string_lossy().to_string(),
+            v @ NixValue::AttributeSet(_) => {
+                // Coerce to string via __toString or outPath
+                ToStringBuiltin.to_string_inner(&v, evaluator)?
+            }
             v => {
                 return Err(Error::UnsupportedExpression {
                     reason: format!("substring: third argument must be a string, got {}", v),
@@ -3233,32 +3238,37 @@ impl Builtin for ReplaceStringsBuiltin {
         "replaceStrings"
     }
 
-    fn call(&self, args: &[NixValue]) -> Result<NixValue> {
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
         if args.len() != 3 {
             return Err(Error::UnsupportedExpression {
                 reason: format!("replaceStrings takes 3 arguments, got {}", args.len()),
             });
         }
 
-        let from_list = match &args[0] {
+        // Force all arguments
+        let from_val = args[0].clone().force(evaluator)?;
+        let to_val = args[1].clone().force(evaluator)?;
+        let s_val = args[2].clone().force(evaluator)?;
+
+        let from_list = match &from_val {
             NixValue::List(l) => l,
             _ => {
                 return Err(Error::UnsupportedExpression {
                     reason: format!(
                         "replaceStrings: first argument must be a list, got {}",
-                        args[0]
+                        from_val
                     ),
                 });
             }
         };
 
-        let to_list = match &args[1] {
+        let to_list = match &to_val {
             NixValue::List(l) => l,
             _ => {
                 return Err(Error::UnsupportedExpression {
                     reason: format!(
                         "replaceStrings: second argument must be a list, got {}",
-                        args[1]
+                        to_val
                     ),
                 });
             }
@@ -3274,13 +3284,13 @@ impl Builtin for ReplaceStringsBuiltin {
             });
         }
 
-        let s = match &args[2] {
+        let s = match &s_val {
             NixValue::String(s) => s.clone(),
             _ => {
                 return Err(Error::UnsupportedExpression {
                     reason: format!(
                         "replaceStrings: third argument must be a string, got {}",
-                        args[2]
+                        s_val
                     ),
                 });
             }
@@ -3289,26 +3299,33 @@ impl Builtin for ReplaceStringsBuiltin {
         // Apply replacements sequentially
         // Nix's replaceStrings processes replacements in order, applying each pattern globally
         // Empty strings are handled specially: they insert replacements at boundaries
-        let mut result = s.clone();
+        let mut result = s;
 
         for (from, to) in from_list.iter().zip(to_list.iter()) {
-            let from_str = match from {
+            // Force each list element
+            let from_forced = from.clone().force(evaluator)?;
+            let to_forced = to.clone().force(evaluator)?;
+
+            let from_str = match &from_forced {
                 NixValue::String(s) => s,
                 _ => {
                     return Err(Error::UnsupportedExpression {
                         reason: format!(
                             "replaceStrings: from list must contain strings, got {}",
-                            from
+                            from_forced
                         ),
                     });
                 }
             };
 
-            let to_str = match to {
+            let to_str = match &to_forced {
                 NixValue::String(s) => s,
                 _ => {
                     return Err(Error::UnsupportedExpression {
-                        reason: format!("replaceStrings: to list must contain strings, got {}", to),
+                        reason: format!(
+                            "replaceStrings: to list must contain strings, got {}",
+                            to_forced
+                        ),
                     });
                 }
             };
@@ -3323,6 +3340,12 @@ impl Builtin for ReplaceStringsBuiltin {
         }
 
         Ok(NixValue::String(result))
+    }
+
+    fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
+        Err(Error::UnsupportedExpression {
+            reason: "replaceStrings requires evaluator context".to_string(),
+        })
     }
 }
 
