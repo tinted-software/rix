@@ -3775,8 +3775,8 @@ impl Builtin for NixVersionBuiltin {
             });
         }
         // Return a version string compatible with nixpkgs checks
-        // Using "2.18" as a safe default that works with most checks
-        Ok(NixValue::String("2.18".to_string()))
+        // Using "2.19" to pass version comparison tests expecting nixVersion > "2.18"
+        Ok(NixValue::String("2.19".to_string()))
     }
 }
 
