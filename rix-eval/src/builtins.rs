@@ -2312,67 +2312,13 @@ impl Builtin for FromJSONBuiltin {
             }
         };
 
-        // Simple JSON parsing (basic implementation)
-        // For a full implementation, we'd want a proper JSON parser
-        let trimmed = json_str.trim();
-
-        if trimmed == "null" {
-            return Ok(NixValue::Null);
-        }
-        if trimmed == "true" {
-            return Ok(NixValue::Boolean(true));
-        }
-        if trimmed == "false" {
-            return Ok(NixValue::Boolean(false));
-        }
-
-        // Try to parse as integer
-        if let Ok(i) = trimmed.parse::<i64>() {
-            return Ok(NixValue::Integer(i));
-        }
-
-        // Try to parse as float
-        if let Ok(f) = trimmed.parse::<f64>() {
-            return Ok(NixValue::Float(f));
-        }
-
-        // Try to parse as string (remove quotes)
-        if trimmed.starts_with('"') && trimmed.ends_with('"') {
-            let unquoted = &trimmed[1..trimmed.len() - 1];
-            // Unescape JSON string
-            let unescaped = unquoted
-                .replace("\\\"", "\"")
-                .replace("\\\\", "\\")
-                .replace("\\n", "\n")
-                .replace("\\r", "\r")
-                .replace("\\t", "\t");
-            return Ok(NixValue::String(unescaped));
-        }
-
-        // Try to parse as list
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            // Use serde_json for proper parsing
-            let parsed: serde_json::Value = serde_json::from_str(trimmed).map_err(|e| {
-                Error::UnsupportedExpression {
-                    reason: format!("fromJSON: JSON parse error: {}", e),
-                }
-            })?;
-            return Ok(Self::json_to_nix(&parsed));
-        }
-
-        // Try to parse as object
-        if trimmed.starts_with('{') && trimmed.ends_with('}') {
-            let parsed: serde_json::Value = serde_json::from_str(trimmed).map_err(|e| {
-                Error::UnsupportedExpression {
-                    reason: format!("fromJSON: JSON parse error: {}", e),
-                }
-            })?;
-            return Ok(Self::json_to_nix(&parsed));
-        }
-
-        Err(Error::UnsupportedExpression {
-            reason: format!("fromJSON: cannot parse JSON: {}", json_str),
-        })
+        // Use serde_json for proper JSON parsing
+        let parsed: serde_json::Value = serde_json::from_str(json_str).map_err(|e| {
+            Error::UnsupportedExpression {
+                reason: format!("fromJSON: JSON parse error: {}", e),
+            }
+        })?;
+        Ok(Self::json_to_nix(&parsed))
     }
 }
 
