@@ -5,6 +5,7 @@ use crate::eval::Evaluator;
 use crate::eval::context::VariableScope;
 use crate::value::NixValue;
 use rix_parser::ast::{BinOp, BinOpKind, UnaryOp};
+use std::sync::Arc;
 
 impl Evaluator {
     pub(crate) fn evaluate_binop(&self, binop: &BinOp, scope: &VariableScope) -> Result<NixValue> {
@@ -507,6 +508,9 @@ impl Evaluator {
                 // All elements equal so far - compare lengths
                 a.len() < b.len()
             }
+            (NixValue::Function(a), NixValue::Function(b)) => {
+                Arc::as_ptr(a) < Arc::as_ptr(b)
+            }
             _ => {
                 return Err(Error::UnsupportedExpression {
                     reason: format!("cannot compare {} and {} with <", lhs_deep, rhs_deep),
@@ -545,6 +549,9 @@ impl Evaluator {
                 }
                 // All elements equal so far - compare lengths
                 a.len() > b.len()
+            }
+            (NixValue::Function(a), NixValue::Function(b)) => {
+                Arc::as_ptr(a) > Arc::as_ptr(b)
             }
             _ => {
                 return Err(Error::UnsupportedExpression {
@@ -589,6 +596,9 @@ impl Evaluator {
                 // All elements equal so far - compare lengths
                 a.len() <= b.len()
             }
+            (NixValue::Function(a), NixValue::Function(b)) => {
+                Arc::as_ptr(a) <= Arc::as_ptr(b)
+            }
             _ => {
                 return Err(Error::UnsupportedExpression {
                     reason: format!("cannot compare {} and {} with <=", lhs_deep, rhs_deep),
@@ -631,6 +641,9 @@ impl Evaluator {
                 }
                 // All elements equal so far - compare lengths
                 a.len() >= b.len()
+            }
+            (NixValue::Function(a), NixValue::Function(b)) => {
+                Arc::as_ptr(a) >= Arc::as_ptr(b)
             }
             _ => {
                 return Err(Error::UnsupportedExpression {
