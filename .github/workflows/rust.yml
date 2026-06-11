@@ -1,0 +1,23 @@
+name: Rust
+
+on:
+  merge_group:
+    branches: [ "canon" ]
+  pull_request:
+    branches: [ "canon" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v6
+    - name: Install cargo-binstall
+      uses: cargo-bins/cargo-binstall@e7cc28468cf17df7cb288daea80c0c5437af360b
+    - name: install cargo-nextest
+      run: cargo binstall cargo-nextest
+    - name: Run tests
+      run: cargo nextest run --no-fail-fast
