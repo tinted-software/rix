@@ -1099,6 +1099,18 @@ impl crate::value::NixValue {
     ///
     /// The fully evaluated value or an error
     pub fn deep_force(self, evaluator: &crate::eval::Evaluator) -> Result<NixValue> {
+        self.deep_force_inner(evaluator, 0)
+    }
+
+    fn deep_force_inner(self, evaluator: &crate::eval::Evaluator, depth: usize) -> Result<NixValue> {
+        // Limit deep_force depth to avoid stack overflow on recursive structures
+        const MAX_DEEP_FORCE_DEPTH: usize = 100;
+        if depth > MAX_DEEP_FORCE_DEPTH {
+            // We've hit a cycle or very deep structure; return as-is
+            let value = self.force(evaluator)?;
+            return Ok(value);
+        }
+
         // Keep forcing until we get a non-thunk value
         let mut value = self.force(evaluator)?;
         while let NixValue::Thunk(thunk) = &value {
@@ -1111,14 +1123,14 @@ impl crate::value::NixValue {
             NixValue::List(list) => {
                 let mut forced_list = Vec::new();
                 for item in list {
-                    forced_list.push(item.deep_force(evaluator)?);
+                    forced_list.push(item.deep_force_inner(evaluator, depth + 1)?);
                 }
                 Ok(NixValue::List(forced_list))
             }
             NixValue::AttributeSet(mut attrs) => {
                 let mut forced_attrs = HashMap::new();
                 for (key, value) in attrs.drain() {
-                    forced_attrs.insert(key, value.deep_force(evaluator)?);
+                    forced_attrs.insert(key, value.deep_force_inner(evaluator, depth + 1)?);
                 }
                 Ok(NixValue::AttributeSet(forced_attrs))
             }
