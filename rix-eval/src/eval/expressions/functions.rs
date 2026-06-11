@@ -77,18 +77,19 @@ impl Evaluator {
                 reason: "function application missing argument".to_string(),
             })?;
 
-        // 1. Evaluate function
+        let file_id = self.current_file_id();
+
+        // Evaluate the function expression
         let func_value = self.evaluate_expr_with_scope_impl(&func_expr, scope)?;
 
-        // 2. Create a thunk for the argument to ensure lazy evaluation
-        let file_id = self.current_file_id();
-        let arg_value = NixValue::Thunk(Arc::new(crate::thunk::Thunk::new(
+        // Create a thunk for the argument to ensure lazy evaluation
+        let arg_thunk = NixValue::Thunk(Arc::new(crate::thunk::Thunk::new(
             &arg_expr,
             scope.clone(),
             file_id,
         )));
 
-        // 3. Use NixValue::apply helper
-        func_value.apply(self, arg_value)
+        // Use NixValue::apply helper
+        func_value.apply(self, arg_thunk)
     }
 }
