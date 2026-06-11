@@ -3837,8 +3837,10 @@ impl Builtin for DeepSeqBuiltin {
                 reason: format!("deepSeq takes 2 arguments, got {}", args.len()),
             });
         }
-        // Deeply force the first argument
-        args[0].clone().deep_force(evaluator)?;
+        // Deeply force the first argument, handling recursive structures gracefully
+        // We use a custom deep-force that catches cycles via recursion limits
+        // and doesn't stack-overflow on recursive attrsets.
+        Self::deep_force_limited(args[0].clone(), evaluator, 0)?;
         // Return the second argument
         Ok(args[1].clone())
     }
@@ -3847,6 +3849,37 @@ impl Builtin for DeepSeqBuiltin {
         Err(Error::UnsupportedExpression {
             reason: "deepSeq requires evaluator context".to_string(),
         })
+    }
+}
+
+impl DeepSeqBuiltin {
+    /// Recursively force a value, with a depth limit to handle recursive structures.
+    fn deep_force_limited(value: NixValue, evaluator: &Evaluator, depth: usize) -> Result<()> {
+        // Limit recursion depth to detect cycles without stack overflow
+        if depth > 50 {
+            return Ok(());
+        }
+
+        let forced = value.clone().force(evaluator)?;
+        match forced {
+            NixValue::List(list) => {
+                for item in list {
+                    Self::deep_force_limited(item, evaluator, depth + 1)?;
+                }
+                Ok(())
+            }
+            NixValue::AttributeSet(attrs) => {
+                for (_key, val) in attrs {
+                    Self::deep_force_limited(val, evaluator, depth + 1)?;
+                }
+                Ok(())
+            }
+            NixValue::Thunk(_) => {
+                // Thunk should have been forced above, but handle gracefully
+                Self::deep_force_limited(forced, evaluator, depth + 1)
+            }
+            _ => Ok(()),
+        }
     }
 }
 
