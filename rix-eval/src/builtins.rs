@@ -531,8 +531,17 @@ impl Builtin for ToStringBuiltin {
         let str_value = match forced {
             NixValue::String(s) => s.clone(),
             NixValue::Integer(i) => i.to_string(),
-            NixValue::Float(f) => f.to_string(),
-            NixValue::Boolean(b) => b.to_string(),
+            NixValue::Float(f) => {
+                // Nix displays floats with 5 decimal places
+                format!("{:.5}", f)
+            }
+            NixValue::Boolean(b) => {
+                if b {
+                    "1".to_string()
+                } else {
+                    "".to_string()
+                }
+            }
             NixValue::Null => "".to_string(),
             NixValue::Path(p) => p.display().to_string(),
             NixValue::StorePath(p) => p.clone(),
@@ -712,36 +721,61 @@ impl Builtin for CatAttrsBuiltin {
     fn name(&self) -> &str {
         "catAttrs"
     }
-    fn call(&self, args: &[NixValue]) -> Result<NixValue> {
+
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
         if args.len() != 2 {
             return Err(Error::UnsupportedExpression {
                 reason: format!("catAttrs takes 2 arguments, got {}", args.len()),
             });
         }
 
-        let _attr_name = match &args[0] {
-            NixValue::String(s) => s.clone(),
+        let attr_name_val = args[0].clone().force(evaluator)?;
+        let attr_name = match attr_name_val {
+            NixValue::String(s) => s,
             _ => {
                 return Err(Error::UnsupportedExpression {
-                    reason: format!("catAttrs: first argument must be a string, got {}", args[0]),
+                    reason: format!("catAttrs: first argument must be a string, got {}", attr_name_val),
                 });
             }
         };
 
-        let _list = match &args[1] {
+        let list_val = args[1].clone().force(evaluator)?;
+        let list = match list_val {
             NixValue::List(l) => l,
             _ => {
                 return Err(Error::UnsupportedExpression {
-                    reason: format!("catAttrs: second argument must be a list, got {}", args[1]),
+                    reason: format!("catAttrs: second argument must be a list, got {}", list_val),
                 });
             }
         };
 
         // Collect the attribute from each attribute set in the list
-        // Note: catAttrs requires evaluator context to force thunks, so it's handled specially
-        // This implementation is a fallback and should not be called directly
+        let mut result = Vec::new();
+        for item in list {
+            let item_forced = item.force(evaluator)?;
+            match item_forced {
+                NixValue::AttributeSet(attrs) => {
+                    if let Some(val) = attrs.get(&attr_name) {
+                        result.push(val.clone());
+                    }
+                }
+                _ => {
+                    return Err(Error::UnsupportedExpression {
+                        reason: format!(
+                            "catAttrs: each element must be an attribute set, got {}",
+                            item_forced
+                        ),
+                    });
+                }
+            }
+        }
+
+        Ok(NixValue::List(result))
+    }
+
+    fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
         Err(Error::UnsupportedExpression {
-            reason: "catAttrs requires evaluator context and must be handled specially".to_string(),
+            reason: "catAttrs requires evaluator context".to_string(),
         })
     }
 }
@@ -878,47 +912,52 @@ impl Builtin for ConcatStringsSepBuiltin {
     fn name(&self) -> &str {
         "concatStringsSep"
     }
-    fn call(&self, args: &[NixValue]) -> Result<NixValue> {
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
         if args.len() != 2 {
             return Err(Error::UnsupportedExpression {
                 reason: format!("concatStringsSep takes 2 arguments, got {}", args.len()),
             });
         }
-        let separator = match &args[0] {
-            NixValue::String(s) => s,
+        let sep_val = args[0].clone().force(evaluator)?;
+        let separator = match sep_val {
+            NixValue::String(ref s) => s.clone(),
+            NixValue::Path(ref p) => p.to_string_lossy().to_string(),
             _ => {
                 return Err(Error::UnsupportedExpression {
                     reason: format!(
                         "concatStringsSep: first argument must be a string, got {}",
-                        args[0]
+                        sep_val
                     ),
                 });
             }
         };
-        match &args[1] {
+        let list_val = args[1].clone().force(evaluator)?;
+        match list_val {
             NixValue::List(strings) => {
-                let str_values: Result<Vec<String>> = strings
-                    .iter()
-                    .map(|v| match v {
-                        NixValue::String(s) => Ok(s.clone()),
-                        _ => Err(Error::UnsupportedExpression {
-                            reason: format!(
-                                "concatStringsSep: all elements must be strings, got {}",
-                                v
-                            ),
-                        }),
-                    })
-                    .collect();
-                let joined = str_values?.join(separator);
+                let mut str_values: Vec<String> = Vec::new();
+                for v in strings {
+                    let forced = v.force(evaluator)?;
+                    match forced {
+                        NixValue::String(s) => str_values.push(s),
+                        other => str_values.push(other.to_string()),
+                    }
+                }
+                let joined = str_values.join(&separator);
                 Ok(NixValue::String(joined))
             }
             _ => Err(Error::UnsupportedExpression {
                 reason: format!(
                     "concatStringsSep: second argument must be a list, got {}",
-                    args[1]
+                    list_val
                 ),
             }),
         }
+    }
+
+    fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
+        Err(Error::UnsupportedExpression {
+            reason: "concatStringsSep requires evaluator context".to_string(),
+        })
     }
 }
 
@@ -3323,18 +3362,31 @@ impl Builtin for SplitBuiltin {
             }
         };
 
+        // Handle empty regex specially: split between every character
+        if regex_str.is_empty() {
+            let mut result = Vec::new();
+            result.push(NixValue::String("".to_string())); // leading empty
+            for ch in s.chars() {
+                result.push(NixValue::List(Vec::new())); // empty capture groups
+                result.push(NixValue::String(ch.to_string()));
+            }
+            result.push(NixValue::List(Vec::new())); // empty capture groups at end
+            result.push(NixValue::String("".to_string())); // trailing empty
+            return Ok(NixValue::List(result));
+        }
+
+        let can_match_empty = re.is_match("");
         let mut result = Vec::new();
         let mut last_end = 0;
+        let mut last_match_was_empty = false;
 
         for caps in re.captures_iter(&s) {
             let full_match = caps.get(0).unwrap();
 
-            // Text before the match
-            if full_match.start() > last_end {
-                result.push(NixValue::String(
-                    s[last_end..full_match.start()].to_string(),
-                ));
-            }
+            // Text before the match (always include, even if empty)
+            result.push(NixValue::String(
+                s[last_end..full_match.start()].to_string(),
+            ));
 
             // Capture groups (Nix excluding the full match)
             let mut groups = Vec::new();
@@ -3346,15 +3398,30 @@ impl Builtin for SplitBuiltin {
             }
             result.push(NixValue::List(groups));
 
+            last_match_was_empty = full_match.start() == full_match.end();
             last_end = full_match.end();
         }
 
-        // Final part after last match
-        if last_end < s.len() {
-            result.push(NixValue::String(s[last_end..].to_string()));
-        } else if last_end == 0 && s.is_empty() {
-            // Handle empty string split specially if needed? Nix returns [""]
+        // If the regex can match an empty string and the last non-empty match
+        // ended at the end of the string, Rust regex may not report the trailing
+        // zero-width match. Add it manually.
+        if can_match_empty && last_end == s.len() && !result.is_empty() && !last_match_was_empty {
+            // Compute capture groups for an empty match
+            let mut groups = Vec::new();
+            if let Some(empty_caps) = re.captures("") {
+                for i in 1..empty_caps.len() {
+                    groups.push(match empty_caps.get(i) {
+                        Some(m) => NixValue::String(m.as_str().to_string()),
+                        None => NixValue::Null,
+                    });
+                }
+            }
             result.push(NixValue::String("".to_string()));
+            result.push(NixValue::List(groups));
+            result.push(NixValue::String("".to_string()));
+        } else if last_end <= s.len() {
+            // Final part after last match (always include, even if empty)
+            result.push(NixValue::String(s[last_end..].to_string()));
         }
 
         Ok(NixValue::List(result))

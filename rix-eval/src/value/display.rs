@@ -25,11 +25,8 @@ impl fmt::Display for NixValue {
             }
             NixValue::Integer(i) => write!(f, "{}", i),
             NixValue::Float(fl) => {
-                // Nix displays floats with a maximum of 5 significant digits
-                // Format with 5 digits precision, removing trailing zeros
-                let formatted = format!("{:.5}", fl);
-                let trimmed = formatted.trim_end_matches('0').trim_end_matches('.');
-                write!(f, "{}", trimmed)
+                // Nix displays floats with 5 decimal places
+                write!(f, "{:.5}", fl)
             }
             NixValue::Boolean(b) => write!(f, "{}", b),
             NixValue::Null => write!(f, "null"),
