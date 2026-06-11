@@ -1,6 +1,4 @@
 {
-  description = "Theos — Windows NT-compatible kernel in Rust";
-
   inputs = {
     nixpkgs.url = "github:tinted-software/nixpkgs";
   };
