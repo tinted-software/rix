@@ -532,8 +532,8 @@ impl Builtin for ToStringBuiltin {
             NixValue::String(s) => s.clone(),
             NixValue::Integer(i) => i.to_string(),
             NixValue::Float(f) => {
-                // Nix displays floats with 5 decimal places
-                format!("{:.5}", f)
+                // Nix toString uses 6 decimal places for floats (like std::to_string)
+                format!("{:.6}", f)
             }
             NixValue::Boolean(b) => {
                 if b {

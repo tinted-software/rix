@@ -25,8 +25,11 @@ impl fmt::Display for NixValue {
             }
             NixValue::Integer(i) => write!(f, "{}", i),
             NixValue::Float(fl) => {
-                // Nix displays floats with 5 decimal places
-                write!(f, "{:.5}", fl)
+                // Nix displays floats with a maximum of 5 significant digits,
+                // trimming trailing zeros and decimal point.
+                let formatted = format!("{:.5}", fl);
+                let trimmed = formatted.trim_end_matches('0').trim_end_matches('.');
+                write!(f, "{}", trimmed)
             }
             NixValue::Boolean(b) => write!(f, "{}", b),
             NixValue::Null => write!(f, "null"),
@@ -76,7 +79,14 @@ impl fmt::Display for NixValue {
                 write!(f, "<thunk>")
             }
             NixValue::Function(func) => {
-                write!(f, "<function {}: {}>", func.parameter(), func.body_text())
+                // Curried builtins display as <PRIMOP-APP>
+                if func.body_text().starts_with("__curried_builtin_call:")
+                    || func.body_text() == "__curried_foldl_call"
+                {
+                    write!(f, "<PRIMOP-APP>")
+                } else {
+                    write!(f, "<LAMBDA>")
+                }
             }
             NixValue::Path(path) => {
                 let path_str = path.to_string_lossy().replace('\\', "/");
@@ -94,8 +104,8 @@ impl fmt::Display for NixValue {
             NixValue::DeferredInherit(_, name) => {
                 write!(f, "<deferred inherit: {}>", name)
             }
-            NixValue::Builtin(name) => {
-                write!(f, "<builtin: {}>", name)
+            NixValue::Builtin(_name) => {
+                write!(f, "<PRIMOP>")
             }
         }
     }
