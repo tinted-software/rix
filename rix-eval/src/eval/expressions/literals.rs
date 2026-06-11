@@ -5,7 +5,6 @@ use crate::eval::Evaluator;
 use crate::eval::context::VariableScope;
 use crate::value::NixValue;
 use rix_parser::ast::{InterpolPart, Literal, Str};
-use rowan::ast::AstNode;
 
 impl Evaluator {
     pub(crate) fn evaluate_literal(&self, literal: &Literal) -> Result<NixValue> {

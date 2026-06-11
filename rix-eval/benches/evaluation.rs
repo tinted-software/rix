@@ -70,7 +70,6 @@ fn bench_evaluate_complex_expression(c: &mut Criterion) {
 
 fn bench_variable_resolution(c: &mut Criterion) {
     use nix_eval::VariableScope;
-    use std::collections::HashMap;
 
     let mut evaluator = Evaluator::new();
     let mut scope = VariableScope::new();

@@ -44,7 +44,7 @@ proptest! {
                 NixValue::String(result_str) => {
                     // Basic check - the result should contain the original string
                     // (exact match may vary due to escaping)
-                    prop_assert!(result_str.len() > 0 || s.is_empty());
+                    prop_assert!(!result_str.is_empty() || s.is_empty());
                 }
                 _ => prop_assert!(false, "Expected String, got {:?}", result),
             }

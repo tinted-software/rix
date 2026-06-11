@@ -5,7 +5,6 @@ use crate::eval::Evaluator;
 use crate::eval::context::VariableScope;
 use crate::thunk;
 use crate::value::NixValue;
-use rix_parser::ast::Expr;
 use rix_parser::ast::{AttrpathValue, HasEntry, Inherit};
 use rowan::ast::AstNode;
 use std::collections::HashMap;

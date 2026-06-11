@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 /// - Lexical variables take precedence.
 /// - 'with' expressions provide a lazy fallback stack.
 /// - 'rec' and 'let' bindings provide a shared recursive scope.
-/// Represents a single layer in the variable scope stack
+///   Represents a single layer in the variable scope stack
 #[derive(Debug, Clone)]
 pub enum ScopeLayer {
     /// Regular lexical variables (e.g. from function arguments)
@@ -71,10 +71,10 @@ impl VariableScope {
                     }
                 }
                 ScopeLayer::Recursive(mutex) => {
-                    if let Ok(map) = mutex.lock() {
-                        if let Some(v) = map.get(name) {
-                            return Some(v.clone());
-                        }
+                    if let Ok(map) = mutex.lock()
+                        && let Some(v) = map.get(name)
+                    {
+                        return Some(v.clone());
                     }
                 }
             }

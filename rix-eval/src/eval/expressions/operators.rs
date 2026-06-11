@@ -5,7 +5,6 @@ use crate::eval::Evaluator;
 use crate::eval::context::VariableScope;
 use crate::value::NixValue;
 use rix_parser::ast::{BinOp, BinOpKind, UnaryOp};
-use rowan::ast::AstNode;
 
 impl Evaluator {
     pub(crate) fn evaluate_binop(&self, binop: &BinOp, scope: &VariableScope) -> Result<NixValue> {
@@ -31,7 +30,7 @@ impl Evaluator {
             let lhs = lhs_raw.force(self)?;
             let lhs_bool = lhs.as_bool()?;
 
-            return match op {
+            match op {
                 BinOpKind::Or => {
                     if lhs_bool {
                         Ok(NixValue::Boolean(true))
@@ -60,7 +59,7 @@ impl Evaluator {
                     }
                 }
                 _ => unreachable!(),
-            };
+            }
         } else {
             // For all other operators, evaluate both operands first
             let lhs_raw = self.evaluate_expr_with_scope(&lhs_expr, scope)?;
@@ -154,7 +153,6 @@ impl Evaluator {
     /// - Integer addition: `1 + 2` → `3`
     /// - Float addition: `1.5 + 2.5` → `4.0`
     /// - String concatenation: `"hello" + "world"` → `"helloworld"`
-
     pub(crate) fn evaluate_unary_op(
         &self,
         unary_op: &UnaryOp,
@@ -206,8 +204,6 @@ impl Evaluator {
     }
 
     /// Evaluate integer division operation
-    ///
-
     pub(crate) fn evaluate_add(&self, lhs: &NixValue, rhs: &NixValue) -> Result<NixValue> {
         // Force thunks before addition
         let lhs_forced = lhs.clone().force(self)?;
@@ -234,11 +230,11 @@ impl Evaluator {
                 if rhs_str == "/" {
                     // Special case: /bin + "/" = /bin
                     Ok(NixValue::Path(lhs_path.clone()))
-                } else if rhs_str.starts_with('/') {
+                } else if let Some(component) = rhs_str.strip_prefix('/') {
                     // If string starts with "/", treat it as a path component
                     // e.g., /bin + "/bar" = /bin/bar
                     let mut result = lhs_path.clone();
-                    let component = &rhs_str[1..]; // Remove leading "/"
+                    // Remove leading "/"
                     if !component.is_empty() {
                         result.push(component);
                     }
@@ -390,7 +386,6 @@ impl Evaluator {
     ///
     /// In Nix, `-` is used for:
     /// - Integer subtraction: `5 - 2` → `3`
-
     pub(crate) fn evaluate_subtract(&self, lhs: &NixValue, rhs: &NixValue) -> Result<NixValue> {
         match (lhs, rhs) {
             (NixValue::Integer(a), NixValue::Integer(b)) => Ok(NixValue::Integer(a - b)),
@@ -407,7 +402,6 @@ impl Evaluator {
     ///
     /// In Nix, `*` is used for:
     /// - Integer multiplication: `2 * 3` → `6`
-
     pub(crate) fn evaluate_multiply(&self, lhs: &NixValue, rhs: &NixValue) -> Result<NixValue> {
         match (lhs, rhs) {
             (NixValue::Integer(a), NixValue::Integer(b)) => Ok(NixValue::Integer(a * b)),
@@ -420,13 +414,7 @@ impl Evaluator {
         }
     }
 
-    /// Evaluate division operation
-    ///
-    /// In Nix, `/` is used for:
-
-    /// Evaluate a parenthesized expression
-    ///
-
+    /// Evaluate equality comparison (`==`)
     pub(crate) fn evaluate_equal(&self, lhs: &NixValue, rhs: &NixValue) -> Result<NixValue> {
         // Deep force both sides to ensure all nested thunks are evaluated
         let lhs_deep = lhs.clone().deep_force(self)?;
@@ -464,10 +452,10 @@ impl Evaluator {
                         if let Some(b_val) = b.get(key) {
                             // Recursively compare values, handling nested attribute sets
                             // evaluate_equal will handle deep forcing, so we can call it directly
-                            match self.evaluate_equal(a_val, b_val) {
-                                Ok(NixValue::Boolean(true)) => true,
-                                _ => false,
-                            }
+                            matches!(
+                                self.evaluate_equal(a_val, b_val),
+                                Ok(NixValue::Boolean(true))
+                            )
                         } else {
                             false
                         }
@@ -481,8 +469,6 @@ impl Evaluator {
     }
 
     /// Evaluate inequality comparison (`!=`)
-    ///
-
     pub(crate) fn evaluate_not_equal(&self, lhs: &NixValue, rhs: &NixValue) -> Result<NixValue> {
         let equal = self.evaluate_equal(lhs, rhs)?;
         match equal {
@@ -492,8 +478,6 @@ impl Evaluator {
     }
 
     /// Evaluate less-than comparison (`<`)
-    ///
-
     pub(crate) fn evaluate_less(&self, lhs: &NixValue, rhs: &NixValue) -> Result<NixValue> {
         // Deep force both sides to ensure all nested thunks are evaluated
         let lhs_deep = lhs.clone().deep_force(self)?;
@@ -532,9 +516,7 @@ impl Evaluator {
         Ok(NixValue::Boolean(result))
     }
 
-    /// Evaluate less-than-or-equal comparison (`<=`)
-    ///
-
+    /// Evaluate greater-than comparison (`>`)
     pub(crate) fn evaluate_greater(&self, lhs: &NixValue, rhs: &NixValue) -> Result<NixValue> {
         // Deep force both sides to ensure all nested thunks are evaluated
         let lhs_deep = lhs.clone().deep_force(self)?;
@@ -573,9 +555,7 @@ impl Evaluator {
         Ok(NixValue::Boolean(result))
     }
 
-    /// Evaluate greater-than-or-equal comparison (`>=`)
-    ///
-
+    /// Evaluate less-than-or-equal comparison (`<=`)
     pub(crate) fn evaluate_less_or_equal(
         &self,
         lhs: &NixValue,
@@ -618,9 +598,7 @@ impl Evaluator {
         Ok(NixValue::Boolean(result))
     }
 
-    /// Evaluate greater-than comparison (`>`)
-    ///
-
+    /// Evaluate greater-than-or-equal comparison (`>=`)
     pub(crate) fn evaluate_greater_or_equal(
         &self,
         lhs: &NixValue,
@@ -667,7 +645,7 @@ impl Evaluator {
     ///
     /// In Nix, `&&` performs short-circuit evaluation:
     /// - If the left operand is falsy (false or null), return it without evaluating the right operand
-
+    #[allow(dead_code)]
     pub(crate) fn evaluate_and(&self, lhs: &NixValue, rhs: &NixValue) -> Result<NixValue> {
         // Check if lhs is falsy (false or null)
         let lhs_falsy = matches!(lhs, NixValue::Boolean(false) | NixValue::Null);
@@ -685,7 +663,7 @@ impl Evaluator {
     ///
     /// In Nix, `||` performs short-circuit evaluation:
     /// - If the left operand is truthy (not false and not null), return it without evaluating the right operand
-
+    #[allow(dead_code)]
     pub(crate) fn evaluate_or(&self, lhs: &NixValue, rhs: &NixValue) -> Result<NixValue> {
         // Check if lhs is falsy (false or null)
         let lhs_falsy = matches!(lhs, NixValue::Boolean(false) | NixValue::Null);
@@ -700,8 +678,6 @@ impl Evaluator {
     }
 
     /// Evaluate list concatenation operation (`++`)
-    ///
-
     pub(crate) fn evaluate_concat(&self, lhs: &NixValue, rhs: &NixValue) -> Result<NixValue> {
         match (lhs, rhs) {
             (NixValue::List(a), NixValue::List(b)) => {
