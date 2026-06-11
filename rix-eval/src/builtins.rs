@@ -528,37 +528,72 @@ impl Builtin for ToStringBuiltin {
             });
         }
         let forced = args[0].clone().force(evaluator)?;
-        let str_value = match forced {
-            NixValue::String(s) => s.clone(),
-            NixValue::Integer(i) => i.to_string(),
-            NixValue::Float(f) => {
-                // Nix toString uses 6 decimal places for floats (like std::to_string)
-                format!("{:.6}", f)
-            }
-            NixValue::Boolean(b) => {
-                if b {
-                    "1".to_string()
-                } else {
-                    "".to_string()
-                }
-            }
-            NixValue::Null => "".to_string(),
-            NixValue::Path(p) => p.display().to_string(),
-            NixValue::StorePath(p) => p.clone(),
-            NixValue::Derivation(drv) => format!("<derivation {}>", drv.name),
-            NixValue::Function(_) | NixValue::Builtin(_) => {
-                format!("{}", forced)
-            }
-            _ => {
-                format!("{}", forced)
-            }
-        };
+        let str_value = self.to_string_inner(&forced, evaluator)?;
         Ok(NixValue::String(str_value))
     }
     fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
         Err(Error::UnsupportedExpression {
             reason: "toString requires evaluator context".to_string(),
         })
+    }
+}
+
+impl ToStringBuiltin {
+    fn to_string_inner(&self, value: &NixValue, evaluator: &Evaluator) -> Result<String> {
+        match value {
+            NixValue::String(s) => Ok(s.clone()),
+            NixValue::Integer(i) => Ok(i.to_string()),
+            NixValue::Float(f) => {
+                // Nix toString uses 6 decimal places for floats (like std::to_string)
+                Ok(format!("{:.6}", f))
+            }
+            NixValue::Boolean(b) => {
+                if *b {
+                    Ok("1".to_string())
+                } else {
+                    Ok("".to_string())
+                }
+            }
+            NixValue::Null => Ok("".to_string()),
+            NixValue::Path(p) => Ok(p.display().to_string()),
+            NixValue::StorePath(p) => Ok(p.clone()),
+            NixValue::Derivation(drv) => Ok(format!("<derivation {}>", drv.name)),
+            NixValue::Function(_) | NixValue::Builtin(_) => {
+                Ok(format!("{}", value))
+            }
+            NixValue::List(items) => {
+                let mut parts = Vec::new();
+                for item in items {
+                    let forced = item.clone().force(evaluator)?;
+                    parts.push(self.to_string_inner(&forced, evaluator)?);
+                }
+                Ok(parts.join(" "))
+            }
+            NixValue::AttributeSet(attrs) => {
+                // Check for __toString attribute first
+                if let Some(ts) = attrs.get("__toString") {
+                    let ts_forced = ts.clone().force(evaluator)?;
+                    // Call the self: body pattern
+                    let result = ts_forced.apply(evaluator, NixValue::AttributeSet(attrs.clone()))?;
+                    let result_forced = result.force(evaluator)?;
+                    return self.to_string_inner(&result_forced, evaluator);
+                }
+                // Check for outPath attribute
+                if let Some(outpath) = attrs.get("outPath") {
+                    let outpath_forced = outpath.clone().force(evaluator)?;
+                    return self.to_string_inner(&outpath_forced, evaluator);
+                }
+                // Default: format as attribute set
+                Ok(format!("{}", value))
+            }
+            NixValue::Thunk(_) => {
+                let forced = value.clone().force(evaluator)?;
+                self.to_string_inner(&forced, evaluator)
+            }
+            _ => {
+                Ok(format!("{}", value))
+            }
+        }
     }
 }
 
