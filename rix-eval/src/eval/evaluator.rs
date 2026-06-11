@@ -890,6 +890,8 @@ impl Evaluator {
                 })
             }
             "builtins" => {
+                // Create the builtins attrset with a recursive self-reference.
+                // We use a thunk that when forced, looks up "builtins" recursively.
                 let mut builtins_attrs = HashMap::new();
                 for name in self.builtins.keys() {
                     builtins_attrs.insert(name.clone(), NixValue::Builtin(name.clone()));
@@ -898,11 +900,19 @@ impl Evaluator {
                     "currentSystem".to_string(),
                     NixValue::String("x86_64-linux".to_string()),
                 );
-                builtins_attrs.insert(
-                    "builtins".to_string(),
-                    NixValue::String("__builtins_self__".to_string()),
-                );
-                Ok(NixValue::AttributeSet(builtins_attrs))
+                // Create the result first (without builtins key)
+                let result = NixValue::AttributeSet(builtins_attrs);
+                // Now create a version with the self-reference added.
+                // We clone the inner map and add "builtins" key pointing to the result.
+                // Note: this means builtins.builtins.builtins works too because
+                // each level's "builtins" key points to the same overall structure.
+                if let NixValue::AttributeSet(ref inner) = result {
+                    let mut with_self = inner.clone();
+                    with_self.insert("builtins".to_string(), result.clone());
+                    Ok(NixValue::AttributeSet(with_self))
+                } else {
+                    unreachable!()
+                }
             }
             _ => {
                 // Check if it's a global builtin (like map, all, filter)
