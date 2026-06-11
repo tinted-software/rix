@@ -3948,9 +3948,9 @@ impl Builtin for DirOfBuiltin {
         }
 
         let arg = args[0].clone().force(evaluator)?;
-        let path_str = match arg {
-            NixValue::String(s) => s,
-            NixValue::Path(p) => p.to_string_lossy().to_string(),
+        let (path_str, is_path) = match &arg {
+            NixValue::String(s) => (s.clone(), false),
+            NixValue::Path(p) => (p.to_string_lossy().to_string(), true),
             _ => {
                 return Err(Error::UnsupportedExpression {
                     reason: format!("dirOf: expected string or path, got {}", arg),
@@ -3958,18 +3958,25 @@ impl Builtin for DirOfBuiltin {
             }
         };
 
-        // Get the parent directory
-        let path = std::path::Path::new(&path_str);
-        match path.parent() {
-            Some(parent) => {
-                let parent_str = parent.to_string_lossy().to_string();
-                if parent_str.is_empty() {
-                    Ok(NixValue::String("/".to_string()))
+        // Nix dirOf: return everything before the last slash.
+        // If no slash, return ".".
+        match path_str.rfind('/') {
+            None => Ok(NixValue::String(".".to_string())),
+            Some(pos) => {
+                let parent = &path_str[..pos];
+                if parent.is_empty() {
+                    // Root path: return "/"
+                    if is_path {
+                        Ok(NixValue::Path(std::path::PathBuf::from("/")))
+                    } else {
+                        Ok(NixValue::String("/".to_string()))
+                    }
+                } else if is_path || parent.starts_with('/') {
+                    Ok(NixValue::Path(std::path::PathBuf::from(parent)))
                 } else {
-                    Ok(NixValue::String(parent_str))
+                    Ok(NixValue::String(parent.to_string()))
                 }
             }
-            None => Ok(NixValue::String("/".to_string())),
         }
     }
 
