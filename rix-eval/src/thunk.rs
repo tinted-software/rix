@@ -241,11 +241,19 @@ impl Thunk {
                 // will return the cached value without re-evaluation.
                 match result {
                     Ok(value) => {
+                        // If the result is itself a thunk, force it recursively.
+                        // This detects infinite recursion (blackhole) when a thunk
+                        // evaluates to itself.
+                        let final_value = if let NixValue::Thunk(inner) = &value {
+                            inner.force(evaluator)?
+                        } else {
+                            value
+                        };
                         let mut state_guard = self.state.lock().unwrap();
                         let mut value_guard = self.cached_value.lock().unwrap();
                         *state_guard = ThunkState::Evaluated;
-                        *value_guard = Some(value.clone());
-                        Ok(value)
+                        *value_guard = Some(final_value.clone());
+                        Ok(final_value)
                     }
                     Err(e) => {
                         // Reset state on error so the thunk can be retried
