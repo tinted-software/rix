@@ -4058,8 +4058,9 @@ impl Builtin for GetEnvBuiltin {
             }
         };
 
-        // Return empty string for now (sandboxed environment)
-        Ok(NixValue::String("".to_string()))
+        // Read from actual environment variables
+        let result = std::env::var(&_var_name).unwrap_or_default();
+        Ok(NixValue::String(result))
     }
 
     fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
