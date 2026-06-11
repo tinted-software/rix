@@ -3,10 +3,41 @@
 use crate::value::NixValue;
 use std::fmt;
 use std::sync::Arc;
+use std::cell::Cell;
+
+thread_local! {
+    /// Recursion depth guard for Display to prevent stack overflow on recursive structures
+    static DISPLAY_DEPTH: Cell<usize> = Cell::new(0);
+}
+
+const MAX_DISPLAY_DEPTH: usize = 20;
 
 /// Format a Nix value as a string
 impl fmt::Display for NixValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Guard against infinite recursion on cyclic structures
+        let depth = DISPLAY_DEPTH.with(|d| {
+            let current = d.get();
+            if current > MAX_DISPLAY_DEPTH {
+                return Err(fmt::Error);
+            }
+            d.set(current + 1);
+            Ok(current)
+        });
+
+        let depth = match depth {
+            Ok(d) => d,
+            Err(_) => return write!(f, "<cycle>"),
+        };
+
+        let result = self.fmt_inner(f);
+        DISPLAY_DEPTH.with(|d| d.set(depth));
+        result
+    }
+}
+
+impl NixValue {
+    fn fmt_inner(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             NixValue::String(s) => {
                 // Escape special characters in strings for display

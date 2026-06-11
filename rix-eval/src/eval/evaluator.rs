@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-const MAX_RECURSION_DEPTH: usize = 100000;
+const MAX_RECURSION_DEPTH: usize = 2000;
 
 pub struct Evaluator {
     /// Map of builtin function names to their implementations
