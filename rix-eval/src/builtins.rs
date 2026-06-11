@@ -2219,6 +2219,13 @@ fn nix_value_to_json_value(value: &NixValue, evaluator: &Evaluator) -> Result<se
                 }
             }
 
+            // Nix toJSON auto-unwraps outPath: if the attrset has only outPath key
+            // or if it has outPath key, the outPath value is used instead
+            if let Some(outpath) = attrs.get("outPath") {
+                let outpath_forced = outpath.clone().force(evaluator)?;
+                return nix_value_to_json_value(&outpath_forced, evaluator);
+            }
+
             let mut map = serde_json::Map::new();
             let mut keys: Vec<_> = attrs.keys().collect();
             keys.sort();
