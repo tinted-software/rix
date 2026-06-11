@@ -166,6 +166,12 @@ impl Evaluator {
         self.register_builtin(Box::new(crate::builtins::HasContextBuiltin));
         self.register_builtin(Box::new(crate::builtins::ToXMLBuiltin));
         self.register_builtin(Box::new(crate::builtins::FunctionArgsBuiltin));
+        self.register_builtin(Box::new(crate::builtins::DeepSeqBuiltin));
+        self.register_builtin(Box::new(crate::builtins::GenericClosureBuiltin));
+        self.register_builtin(Box::new(crate::builtins::DirOfBuiltin));
+        self.register_builtin(Box::new(crate::builtins::FromTOMLBuiltin));
+        self.register_builtin(Box::new(crate::builtins::GetEnvBuiltin));
+        self.register_builtin(Box::new(crate::builtins::HashFileBuiltin));
     }
 
     /// Get a builtin function by name

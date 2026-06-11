@@ -23,6 +23,7 @@ codespan.workspace = true
 codespan-reporting.workspace = true
 regex.workspace = true
 quick-xml.workspace = true
+toml.workspace = true
 rix-parser.workspace = true
 
 [dev-dependencies]
