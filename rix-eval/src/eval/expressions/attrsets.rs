@@ -323,6 +323,10 @@ impl Evaluator {
                     }
                 }
                 _ => {
+                    // If the current value is not an attrset, check for or-default
+                    if let Some(default) = select.default_expr() {
+                        return self.evaluate_expr_with_scope(&default, scope);
+                    }
                     return Err(Error::UnsupportedExpression {
                         reason: format!("cannot select from non-attrset: {}", current),
                     });
