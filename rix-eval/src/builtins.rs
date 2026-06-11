@@ -2375,7 +2375,10 @@ impl Builtin for GenListBuiltin {
         }
 
         // genList generator length
-        let generator = args[0].clone().force(evaluator)?;
+        // Don't force the generator - let it be forced lazily when thunks are evaluated.
+        // This is important for recursive definitions where the generator references
+        // values being constructed.
+        let generator = args[0].clone();
         let length = match args[1].clone().force(evaluator)? {
             NixValue::Integer(n) => {
                 if n < 0 {
