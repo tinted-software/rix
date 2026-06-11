@@ -1904,10 +1904,11 @@ impl Builtin for FoldlStrictBuiltin {
         match list_val {
             NixValue::List(list) => {
                 for item in list {
-                    // foldl' is strict, so we force the accumulator before applying
-                    acc = acc.force(evaluator)?;
-                    let res = op.clone().apply(evaluator, acc)?;
-                    acc = res.apply(evaluator, item)?;
+                    // foldl' applies op to (acc, item) and forces the result.
+                    // The initial accumulator is NOT forced before the first application.
+                    let partial = op.clone().apply(evaluator, acc)?;
+                    let result = partial.apply(evaluator, item)?;
+                    acc = result.force(evaluator)?;
                 }
                 Ok(acc)
             }

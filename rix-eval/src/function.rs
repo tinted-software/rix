@@ -424,13 +424,11 @@ impl Function {
 
                 // Check if we have __curried_first_arg (old style) or __curried_arg1, __curried_arg2, etc. (new style)
                 if let Some(first_arg) = self.closure.get("__curried_first_arg") {
-                    // Old style: single argument - force thunks before collecting
-                    let first_arg_forced = first_arg.clone().force(evaluator)?;
-                    args.push(first_arg_forced);
-                    let arg_forced = argument.clone().force(evaluator)?;
-                    args.push(arg_forced);
+                    // Old style: single argument
+                    args.push(first_arg.clone());
+                    args.push(argument.clone());
                 } else {
-                    // New style: multiple arguments - force thunks before collecting
+                    // New style: multiple arguments
                     let arg_count = self
                         .closure
                         .get("__curried_arg_count")
@@ -442,12 +440,10 @@ impl Function {
 
                     for i in 1..=arg_count {
                         if let Some(arg) = self.closure.get(&format!("__curried_arg{}", i)) {
-                            let arg_forced = arg.clone().force(evaluator)?;
-                            args.push(arg_forced);
+                            args.push(arg.clone());
                         }
                     }
-                    let arg_forced = argument.clone().force(evaluator)?;
-                    args.push(arg_forced);
+                    args.push(argument.clone());
                 }
 
                 match builtin.call_with_evaluator(&args, evaluator) {
