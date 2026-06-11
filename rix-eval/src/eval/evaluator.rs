@@ -12,9 +12,9 @@ use rix_parser::tokenizer::tokenize;
 use rowan::ast::AstNode;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 const MAX_RECURSION_DEPTH: usize = 100000;
 
 pub struct Evaluator {
@@ -24,6 +24,7 @@ pub struct Evaluator {
     pub(crate) scope: VariableScope,
     /// Cache of imported modules (path -> evaluated value)
     /// Uses interior mutability to allow caching during immutable evaluation
+    #[allow(dead_code)]
     pub(crate) import_cache: Rc<RefCell<HashMap<PathBuf, NixValue>>>,
     /// Search paths for resolving <nixpkgs> style imports
     pub(crate) search_paths: HashMap<String, PathBuf>,
@@ -39,6 +40,12 @@ pub struct Evaluator {
     context_stack: Rc<RefCell<Vec<EvaluationContext>>>,
     /// Current recursion depth to prevent stack overflows
     recursion_depth: Cell<usize>,
+}
+
+impl Default for Evaluator {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Evaluator {
@@ -176,8 +183,8 @@ impl Evaluator {
     }
 
     /// Get a builtin function by name
-    pub(crate) fn get_builtin(&self, name: &str) -> Option<&Box<dyn Builtin>> {
-        self.builtins.get(name)
+    pub(crate) fn get_builtin(&self, name: &str) -> Option<&dyn Builtin> {
+        self.builtins.get(name).map(|v| &**v)
     }
 
     /// Check if a path is a valid Nix store path
@@ -187,6 +194,7 @@ impl Evaluator {
     /// - `<hash>` is a 32-character base32-encoded hash
     /// - `<name>` is the rest of the path component (can contain any characters except `/`)
     /// - The hash and name are separated by a single `-`
+    #[allow(dead_code)]
     pub(crate) fn is_valid_store_path(&self, path: &str) -> bool {
         if !path.starts_with("/nix/store/") {
             return false;
@@ -234,7 +242,6 @@ impl Evaluator {
     ///
     /// let mut evaluator = Evaluator::new();
     /// evaluator.register_builtin(Box::new(AddBuiltin));
-
     pub fn register_builtin(&mut self, builtin: Box<dyn Builtin>) {
         self.builtins.insert(builtin.name().to_string(), builtin);
     }
@@ -275,7 +282,6 @@ impl Evaluator {
     /// scope.insert("x".to_string(), NixValue::Integer(42));
     /// scope.insert("y".to_string(), NixValue::String("hello".to_string()));
     /// evaluator.set_scope(scope);
-
     fn parse_nix_path(&mut self) {
         if let Ok(nix_path) = std::env::var("NIX_PATH") {
             for entry in nix_path.split(':') {
@@ -319,34 +325,31 @@ impl Evaluator {
 
         // Try using nix flake metadata first (for flakes)
         if let Ok(output) = Command::new("nix")
-            .args(&["flake", "metadata", "--json", "--flake", flake_ref])
+            .args(["flake", "metadata", "--json", "--flake", flake_ref])
             .output()
+            && output.status.success()
         {
-            if output.status.success() {
-                // Parse JSON output to get path
-                if let Ok(json) = std::str::from_utf8(&output.stdout) {
-                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json) {
-                        if let Some(path_str) = parsed.get("path").and_then(|p| p.as_str()) {
-                            return Ok(PathBuf::from(path_str));
-                        }
-                    }
-                }
+            // Parse JSON output to get path
+            if let Ok(json) = std::str::from_utf8(&output.stdout)
+                && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json)
+                && let Some(path_str) = parsed.get("path").and_then(|p| p.as_str())
+            {
+                return Ok(PathBuf::from(path_str));
             }
         }
 
         // Fallback: try nix-instantiate for traditional NIX_PATH resolution
         if let Ok(output) = Command::new("nix-instantiate")
-            .args(&["--eval", "-E", &format!("<{}>", flake_ref)])
+            .args(["--eval", "-E", &format!("<{}>", flake_ref)])
             .output()
+            && output.status.success()
         {
-            if output.status.success() {
-                let path_str = std::str::from_utf8(&output.stdout)
-                    .unwrap_or("")
-                    .trim()
-                    .trim_matches('"');
-                if !path_str.is_empty() && path_str.starts_with('/') {
-                    return Ok(PathBuf::from(path_str));
-                }
+            let path_str = std::str::from_utf8(&output.stdout)
+                .unwrap_or("")
+                .trim()
+                .trim_matches('"');
+            if !path_str.is_empty() && path_str.starts_with('/') {
+                return Ok(PathBuf::from(path_str));
             }
         }
 
@@ -360,7 +363,6 @@ impl Evaluator {
     ///
     /// NIX_PATH format: "name1=path1:name2=path2:..."
     /// Example: "nixpkgs=/path/to/nixpkgs:other=/path/to/other"
-
     pub(crate) fn current_file_path(&self) -> Option<PathBuf> {
         let context_stack = self.context_stack.borrow();
         let file_id_to_path = self.file_id_to_path.borrow();
@@ -404,7 +406,6 @@ impl Evaluator {
     /// Resolve a flake reference to a file system path
     ///
     /// Attempts to resolve flake references like "nixpkgs" to actual file system paths
-
     pub fn set_scope(&mut self, scope: VariableScope) {
         self.scope = scope;
     }
@@ -413,7 +414,6 @@ impl Evaluator {
     ///
     /// # Returns
     ///
-
     pub fn scope(&self) -> &VariableScope {
         &self.scope
     }
@@ -424,7 +424,6 @@ impl Evaluator {
     ///
     /// # Returns
     ///
-
     pub fn scope_mut(&mut self) -> &mut VariableScope {
         &mut self.scope
     }
@@ -447,7 +446,6 @@ impl Evaluator {
     ///
     /// let mut evaluator = Evaluator::new();
     /// evaluator.add_search_path("nixpkgs", PathBuf::from("/path/to/nixpkgs"));
-
     pub fn add_search_path(&mut self, name: impl Into<String>, path: PathBuf) {
         self.search_paths.insert(name.into(), path);
     }
@@ -538,8 +536,8 @@ impl Evaluator {
     ///
     /// * `Ok(NixValue)` - The evaluated value
     /// * `Err(Error)` - An error if reading, parsing, or evaluation fails
-    pub fn evaluate_from_file(&self, file_path: &PathBuf) -> Result<NixValue> {
-        let mut actual_path = file_path.clone();
+    pub fn evaluate_from_file(&self, file_path: &Path) -> Result<NixValue> {
+        let mut actual_path = file_path.to_path_buf();
         if actual_path.is_dir() {
             actual_path = actual_path.join("default.nix");
         }
@@ -612,7 +610,6 @@ impl Evaluator {
     ///
     /// # Returns
     ///
-
     pub(crate) fn evaluate_expr(&self, expr: &Expr) -> Result<NixValue> {
         self.evaluate_expr_with_scope_impl(expr, &self.scope)
     }
@@ -687,9 +684,11 @@ impl Evaluator {
                 let func_expr = apply.lambda().ok_or_else(|| Error::UnsupportedExpression {
                     reason: "TCO: function application missing function".to_string(),
                 })?;
-                let arg_expr = apply.argument().ok_or_else(|| Error::UnsupportedExpression {
-                    reason: "TCO: function application missing argument".to_string(),
-                })?;
+                let arg_expr = apply
+                    .argument()
+                    .ok_or_else(|| Error::UnsupportedExpression {
+                        reason: "TCO: function application missing argument".to_string(),
+                    })?;
 
                 // Evaluate the function expression.
                 // Special handling: if the function expression is an identifier
@@ -736,20 +735,19 @@ impl Evaluator {
                 let cond_forced = cond.force(self)?;
                 match cond_forced {
                     NixValue::Boolean(true) => {
-                        let then_expr = if_else.body().ok_or_else(|| {
-                            Error::UnsupportedExpression {
+                        let then_expr =
+                            if_else.body().ok_or_else(|| Error::UnsupportedExpression {
                                 reason: "TCO: if missing then body".to_string(),
-                            }
-                        })?;
+                            })?;
                         self.evaluate_expr_with_tco_inner(&then_expr, scope)
                     }
                     NixValue::Boolean(false) => {
                         let else_expr =
-                            if_else.else_body().ok_or_else(|| {
-                                Error::UnsupportedExpression {
+                            if_else
+                                .else_body()
+                                .ok_or_else(|| Error::UnsupportedExpression {
                                     reason: "TCO: if missing else body".to_string(),
-                                }
-                            })?;
+                                })?;
                         self.evaluate_expr_with_tco_inner(&else_expr, scope)
                     }
                     _ => Err(Error::UnsupportedExpression {
@@ -795,29 +793,27 @@ impl Evaluator {
             let (green_node, errors) = parse(tokens.into_iter());
             if errors.is_empty() {
                 let syntax_node = SyntaxNode::new_root(green_node);
-                if let Some(root) = Root::cast(syntax_node.clone()) {
-                    if let Some(expr) = root.expr() {
-                        if let Expr::Lambda(lambda) = expr {
-                            // Extract parameter and body from the lambda
-                            if let Some(param_node) = lambda.param() {
-                                // param is a Param AST node - extract its text as parameter name
-                                let param_text = param_node.syntax().text().to_string();
-                                let parameter =
-                                    crate::function::Parameter::Simple(param_text);
-                                let body_text = lambda
-                                    .body()
-                                    .map(|b| b.syntax().text().to_string())
-                                    .unwrap_or_default();
+                if let Some(root) = Root::cast(syntax_node.clone())
+                    && let Some(expr) = root.expr()
+                    && let Expr::Lambda(lambda) = expr
+                {
+                    // Extract parameter and body from the lambda
+                    if let Some(param_node) = lambda.param() {
+                        // param is a Param AST node - extract its text as parameter name
+                        let param_text = param_node.syntax().text().to_string();
+                        let parameter = crate::function::Parameter::Simple(param_text);
+                        let body_text = lambda
+                            .body()
+                            .map(|b| b.syntax().text().to_string())
+                            .unwrap_or_default();
 
-                                let func = crate::function::Function::new_curried_builtin_internal(
-                                    parameter,
-                                    body_text,
-                                    thunk.closure().clone(),
-                                    None,
-                                );
-                                return Ok(NixValue::Function(std::sync::Arc::new(func)));
-                            }
-                        }
+                        let func = crate::function::Function::new_curried_builtin_internal(
+                            parameter,
+                            body_text,
+                            thunk.closure().clone(),
+                            None,
+                        );
+                        return Ok(NixValue::Function(std::sync::Arc::new(func)));
                     }
                 }
             }
@@ -873,10 +869,10 @@ impl Evaluator {
         // Innermost 'with' takes precedence, so we iterate the stack in reverse
         for with_val in scope.withs().iter().rev() {
             let with_set = with_val.clone().force(self)?;
-            if let NixValue::AttributeSet(attrs) = with_set {
-                if let Some(v) = attrs.get(text) {
-                    return Ok(v.clone());
-                }
+            if let NixValue::AttributeSet(attrs) = with_set
+                && let Some(v) = attrs.get(text)
+            {
+                return Ok(v.clone());
             }
         }
 
@@ -895,7 +891,7 @@ impl Evaluator {
             }
             "builtins" => {
                 let mut builtins_attrs = HashMap::new();
-                for (name, _builtin) in &self.builtins {
+                for name in self.builtins.keys() {
                     builtins_attrs.insert(name.clone(), NixValue::Builtin(name.clone()));
                 }
                 builtins_attrs.insert(
@@ -931,7 +927,7 @@ impl crate::value::NixValue {
             NixValue::Builtin(name) => {
                 let builtin_name = name;
                 if let Some(builtin) = evaluator.builtins.get(&builtin_name) {
-                    match builtin.call_with_evaluator(&[argument.clone()], evaluator) {
+                    match builtin.call_with_evaluator(std::slice::from_ref(&argument), evaluator) {
                         Ok(res) => Ok(res),
                         Err(Error::UnsupportedExpression { reason })
                             if reason.contains("takes") && reason.contains("arguments") =>

@@ -159,12 +159,12 @@ fn find_files(dir: &Path, prefix: &str, suffix: &str) -> Vec<PathBuf> {
             let path = entry.path();
             if path.is_dir() {
                 files.extend(find_files(&path, prefix, suffix));
-            } else if path.is_file() {
-                if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-                    if file_name.starts_with(prefix) && file_name.ends_with(suffix) {
-                        files.push(path);
-                    }
-                }
+            } else if path.is_file()
+                && let Some(file_name) = path.file_name().and_then(|n| n.to_str())
+                && file_name.starts_with(prefix)
+                && file_name.ends_with(suffix)
+            {
+                files.push(path);
             }
         }
     }
@@ -172,19 +172,39 @@ fn find_files(dir: &Path, prefix: &str, suffix: &str) -> Vec<PathBuf> {
     files
 }
 
+/// Convert a CamelCase or PascalCase string to snake_case
+fn to_snake_case(s: &str) -> String {
+    let mut result = String::with_capacity(s.len() + 4);
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c.is_uppercase() {
+            if !result.is_empty() && !result.ends_with('_') {
+                // Check if previous char was lowercase (transition) or
+                // next char is lowercase (acronym followed by word)
+                let prev_was_lower = result.chars().last().is_some_and(|pc| pc.is_lowercase());
+                let next_is_lower = chars.peek().is_some_and(|nc| nc.is_lowercase());
+                if prev_was_lower || next_is_lower {
+                    result.push('_');
+                }
+            }
+            result.push(c.to_lowercase().next().unwrap_or(c));
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
 fn path_to_test_name(path: &Path, prefix: &str) -> String {
     // Get relative path from tests/tvix-tests
     let test_dir = PathBuf::from("tests/tvix-tests");
     let relative = path.strip_prefix(&test_dir).unwrap_or(path);
 
-    // Convert to a valid Rust identifier
-    let name = relative
+    // Convert to a valid Rust identifier, with snake_case conversion
+    let raw = relative
         .to_string_lossy()
-        .replace('/', "_")
-        .replace('-', "_")
-        .replace('.', "_")
-        .replace(' ', "_")
-        .replace('\\', "_");
+        .replace(['/', '-', '.', ' ', '\\'], "_");
+    let name = to_snake_case(&raw);
 
     format!("{}_{}", prefix, name)
 }

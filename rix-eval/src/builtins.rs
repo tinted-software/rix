@@ -558,9 +558,7 @@ impl ToStringBuiltin {
             NixValue::Path(p) => Ok(p.display().to_string()),
             NixValue::StorePath(p) => Ok(p.clone()),
             NixValue::Derivation(drv) => Ok(format!("<derivation {}>", drv.name)),
-            NixValue::Function(_) | NixValue::Builtin(_) => {
-                Ok(format!("{}", value))
-            }
+            NixValue::Function(_) | NixValue::Builtin(_) => Ok(format!("{}", value)),
             NixValue::List(items) => {
                 let mut parts = Vec::new();
                 for item in items {
@@ -574,7 +572,8 @@ impl ToStringBuiltin {
                 if let Some(ts) = attrs.get("__toString") {
                     let ts_forced = ts.clone().force(evaluator)?;
                     // Call the self: body pattern
-                    let result = ts_forced.apply(evaluator, NixValue::AttributeSet(attrs.clone()))?;
+                    let result =
+                        ts_forced.apply(evaluator, NixValue::AttributeSet(attrs.clone()))?;
                     let result_forced = result.force(evaluator)?;
                     return self.to_string_inner(&result_forced, evaluator);
                 }
@@ -590,9 +589,7 @@ impl ToStringBuiltin {
                 let forced = value.clone().force(evaluator)?;
                 self.to_string_inner(&forced, evaluator)
             }
-            _ => {
-                Ok(format!("{}", value))
-            }
+            _ => Ok(format!("{}", value)),
         }
     }
 }
@@ -640,7 +637,7 @@ impl Builtin for HeadBuiltin {
         let forced = args[0].clone().force(evaluator)?;
         match forced {
             NixValue::List(l) => l
-                .get(0)
+                .first()
                 .cloned()
                 .ok_or_else(|| Error::UnsupportedExpression {
                     reason: "head: empty list".to_string(),
@@ -709,8 +706,7 @@ impl Builtin for AttrNamesBuiltin {
             NixValue::AttributeSet(attrs) => {
                 let mut names: Vec<String> = attrs.keys().cloned().collect();
                 names.sort(); // Nix returns attribute names in sorted order
-                let names_values: Vec<NixValue> =
-                    names.into_iter().map(|k| NixValue::String(k)).collect();
+                let names_values: Vec<NixValue> = names.into_iter().map(NixValue::String).collect();
                 Ok(NixValue::List(names_values))
             }
             _ => Err(Error::UnsupportedExpression {
@@ -769,7 +765,10 @@ impl Builtin for CatAttrsBuiltin {
             NixValue::String(s) => s,
             _ => {
                 return Err(Error::UnsupportedExpression {
-                    reason: format!("catAttrs: first argument must be a string, got {}", attr_name_val),
+                    reason: format!(
+                        "catAttrs: first argument must be a string, got {}",
+                        attr_name_val
+                    ),
                 });
             }
         };
@@ -1292,7 +1291,7 @@ impl Builtin for StorePathBuiltin {
 /// In Nix, `builtins.path` can:
 /// - Convert a string to a path value
 /// - Optionally copy files to the store (with name, filter, etc.)
-/// For now, we implement basic string-to-path conversion.
+///   For now, we implement basic string-to-path conversion.
 pub struct PathBuiltin;
 
 impl Builtin for PathBuiltin {
@@ -1300,7 +1299,7 @@ impl Builtin for PathBuiltin {
         "path"
     }
     fn call(&self, args: &[NixValue]) -> Result<NixValue> {
-        if args.len() < 1 || args.len() > 2 {
+        if args.is_empty() || args.len() > 2 {
             return Err(Error::UnsupportedExpression {
                 reason: format!("path takes 1 or 2 arguments, got {}", args.len()),
             });
@@ -1309,9 +1308,8 @@ impl Builtin for PathBuiltin {
         match &args[0] {
             NixValue::String(path_str) => {
                 // If it's already a store path, return as StorePath
-                if path_str.starts_with("/nix/store/") {
+                if let Some(store_part) = path_str.strip_prefix("/nix/store/") {
                     // Validate store path format
-                    let store_part = &path_str[11..];
                     if let Some(dash_pos) = store_part.find('-') {
                         let hash = &store_part[..dash_pos];
                         if !hash.is_empty() && hash.chars().all(|c| c.is_ascii_alphanumeric()) {
@@ -1369,11 +1367,11 @@ impl Builtin for BaseNameOfBuiltin {
                     return Ok(NixValue::String("".to_string()));
                 }
                 // Check if the last component is "." (like "./.")
-                if let Some(last_component) = p.components().last() {
-                    if let std::path::Component::CurDir = last_component {
-                        // If the path ends with ".", baseNameOf returns ""
-                        return Ok(NixValue::String("".to_string()));
-                    }
+                if let Some(last_component) = p.components().next_back()
+                    && let std::path::Component::CurDir = last_component
+                {
+                    // If the path ends with ".", baseNameOf returns ""
+                    return Ok(NixValue::String("".to_string()));
                 }
                 path_display
             }
@@ -2313,11 +2311,10 @@ impl Builtin for FromJSONBuiltin {
         };
 
         // Use serde_json for proper JSON parsing
-        let parsed: serde_json::Value = serde_json::from_str(json_str).map_err(|e| {
-            Error::UnsupportedExpression {
+        let parsed: serde_json::Value =
+            serde_json::from_str(json_str).map_err(|e| Error::UnsupportedExpression {
                 reason: format!("fromJSON: JSON parse error: {}", e),
-            }
-        })?;
+            })?;
         Ok(Self::json_to_nix(&parsed))
     }
 }
@@ -3831,10 +3828,7 @@ impl Builtin for GenericClosureBuiltin {
     fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
         if args.len() != 1 {
             return Err(Error::UnsupportedExpression {
-                reason: format!(
-                    "genericClosure takes 1 argument, got {}",
-                    args.len()
-                ),
+                reason: format!("genericClosure takes 1 argument, got {}", args.len()),
             });
         }
 
@@ -3879,7 +3873,7 @@ impl Builtin for GenericClosureBuiltin {
         };
 
         let mut result = Vec::new();
-        let mut work_list: Vec<NixValue> = start_list.iter().map(|v| v.clone()).collect();
+        let mut work_list: Vec<NixValue> = start_list.to_vec();
         let mut processed_keys = HashSet::new();
 
         while let Some(current) = work_list.pop() {
@@ -4010,11 +4004,10 @@ impl Builtin for FromTOMLBuiltin {
         };
 
         // Simple TOML parsing using the toml crate
-        let value: toml::Value = toml::from_str(&toml_str).map_err(|e| {
-            Error::UnsupportedExpression {
+        let value: toml::Value =
+            toml::from_str(&toml_str).map_err(|e| Error::UnsupportedExpression {
                 reason: format!("fromTOML: parse error: {}", e),
-            }
-        })?;
+            })?;
 
         Ok(Self::toml_to_nix(&value))
     }
@@ -4028,9 +4021,7 @@ impl FromTOMLBuiltin {
             toml::Value::Float(f) => NixValue::Float(*f),
             toml::Value::Boolean(b) => NixValue::Boolean(*b),
             toml::Value::Datetime(_) => NixValue::String(value.to_string()),
-            toml::Value::Array(arr) => {
-                NixValue::List(arr.iter().map(Self::toml_to_nix).collect())
-            }
+            toml::Value::Array(arr) => NixValue::List(arr.iter().map(Self::toml_to_nix).collect()),
             toml::Value::Table(table) => {
                 let mut attrs = HashMap::new();
                 for (k, v) in table {
@@ -4107,7 +4098,10 @@ impl Builtin for HashFileBuiltin {
             NixValue::Path(p) => p.to_string_lossy().to_string(),
             v => {
                 return Err(Error::UnsupportedExpression {
-                    reason: format!("hashFile: second argument must be a string or path, got {}", v),
+                    reason: format!(
+                        "hashFile: second argument must be a string or path, got {}",
+                        v
+                    ),
                 });
             }
         };

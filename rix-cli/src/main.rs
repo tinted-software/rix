@@ -1,7 +1,6 @@
 use clap::Parser;
 use nix_eval::Evaluator;
 use rootcause::{Report, report};
-use serde_json;
 use std::fs;
 use std::io::{self, Read};
 

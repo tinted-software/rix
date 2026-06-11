@@ -45,6 +45,7 @@
               cargo
               clippy
               rustfmt
+              rust-analyzer
               cargo-nextest
             ];
             shellHook = ''

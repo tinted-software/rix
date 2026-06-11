@@ -11,6 +11,7 @@ use rowan::ast::AstNode;
 use std::path::Path;
 
 impl Evaluator {
+    #[allow(dead_code)]
     pub(crate) fn import_file(&self, file_path: &Path) -> Result<NixValue> {
         // Resolve the path to import
         // First, try to resolve relative paths based on current_file context

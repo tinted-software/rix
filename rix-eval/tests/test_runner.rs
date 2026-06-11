@@ -4,7 +4,6 @@
 //! the reference Nix implementation, with support for test discovery,
 //! filtering, and reporting.
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -26,7 +25,7 @@ pub enum TestResult {
 }
 
 /// Test suite results
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct TestSuiteResults {
     pub passed: usize,
     pub failed: usize,
@@ -36,12 +35,7 @@ pub struct TestSuiteResults {
 
 impl TestSuiteResults {
     pub fn new() -> Self {
-        Self {
-            passed: 0,
-            failed: 0,
-            skipped: 0,
-            failures: Vec::new(),
-        }
+        Self::default()
     }
 
     pub fn total(&self) -> usize {
@@ -124,7 +118,7 @@ pub fn run_compatibility_test(expression: &str, expected_output: Option<&str>) -
 /// Evaluate expression with reference Nix
 fn evaluate_with_nix(expr: &str) -> Result<String, String> {
     let output = Command::new("nix")
-        .args(&["eval", "--raw", "--expr", expr])
+        .args(["eval", "--raw", "--expr", expr])
         .output()
         .map_err(|e| format!("Failed to execute nix: {}", e))?;
 

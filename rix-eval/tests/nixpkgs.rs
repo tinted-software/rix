@@ -21,7 +21,7 @@ use std::str;
 /// Helper to check if nixpkgs is available
 fn nixpkgs_available() -> bool {
     Command::new("nix")
-        .args(&["eval", "--expr", "import <nixpkgs> {}"])
+        .args(["eval", "--expr", "import <nixpkgs> {}"])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
@@ -30,7 +30,7 @@ fn nixpkgs_available() -> bool {
 /// Helper to get nixpkgs path
 fn get_nixpkgs_path() -> Option<String> {
     let output = Command::new("nix")
-        .args(&["eval", "--raw", "--expr", "<nixpkgs>"])
+        .args(["eval", "--raw", "--expr", "<nixpkgs>"])
         .output()
         .ok()?;
 
@@ -77,6 +77,7 @@ fn record_missing_feature(feature: &str) {
     }
 }
 
+#[allow(dead_code)]
 fn get_missing_features() -> Vec<String> {
     get_missing_features_mutex()
         .lock()
@@ -631,7 +632,7 @@ mod basic_imports {
 
             // Import nixpkgs and try to access a simple package
             let expr = "(import <nixpkgs> {}).hello";
-            let result = evaluator.evaluate(&expr).map_err(|e| format!("{:?}", e));
+            let result = evaluator.evaluate(expr).map_err(|e| format!("{:?}", e));
 
             match result {
                 Ok(_) => {
@@ -696,7 +697,6 @@ mod basic_imports {
     #[test]
     fn test_import_path_variable() {
         use std::fs;
-        use std::path::PathBuf;
 
         // Create a temporary directory structure
         let temp_dir = std::env::temp_dir().join("nix-eval-test-import-path");
@@ -713,7 +713,7 @@ mod basic_imports {
         fs::write(&test_file, "let flake = ./test-flake; in import flake").unwrap();
 
         // Test with our evaluator
-        let mut evaluator = Evaluator::new();
+        let evaluator = Evaluator::new();
         let expr = format!("import {}", normalize_path(&test_file.to_string_lossy()));
         let result = evaluator.evaluate(&expr).map_err(|e| format!("{:?}", e));
 
@@ -1390,12 +1390,12 @@ mod full_evaluation {
             if let Ok(nix_path) = std::env::var("NIX_PATH") {
                 // NIX_PATH format: "nixpkgs=/path/to/nixpkgs:other=/path"
                 for entry in nix_path.split(':') {
-                    if let Some((name, path)) = entry.split_once('=') {
-                        if name == "nixpkgs" {
-                            evaluator.add_search_path("nixpkgs", std::path::PathBuf::from(path));
-                            found = true;
-                            break;
-                        }
+                    if let Some((name, path)) = entry.split_once('=')
+                        && name == "nixpkgs"
+                    {
+                        evaluator.add_search_path("nixpkgs", std::path::PathBuf::from(path));
+                        found = true;
+                        break;
                     }
                 }
             }
@@ -1515,12 +1515,12 @@ mod full_evaluation {
             let mut found = false;
             if let Ok(nix_path) = std::env::var("NIX_PATH") {
                 for entry in nix_path.split(':') {
-                    if let Some((name, path)) = entry.split_once('=') {
-                        if name == "nixpkgs" {
-                            evaluator.add_search_path("nixpkgs", std::path::PathBuf::from(path));
-                            found = true;
-                            break;
-                        }
+                    if let Some((name, path)) = entry.split_once('=')
+                        && name == "nixpkgs"
+                    {
+                        evaluator.add_search_path("nixpkgs", std::path::PathBuf::from(path));
+                        found = true;
+                        break;
                     }
                 }
             }
