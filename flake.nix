@@ -1,6 +1,6 @@
 {
   inputs = {
-    nixpkgs.url = "github:tinted-software/nixpkgs";
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
   };
 
   outputs =
@@ -48,12 +48,6 @@
               rust-analyzer
               cargo-nextest
             ];
-            shellHook = ''
-              echo "theos dev shell"
-              echo "  nix run .#<cmd>"
-              echo "  nix build"
-              echo "  nix develop"
-            '';
           };
         }
       );

@@ -1,9 +1,9 @@
 [package]
 name = "rix-cli"
-version = "0.1.0"
-edition = "2024"
-license = "MIT"
-repository = "https://github.com/tinted-software/rix"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 keywords = ["nix", "cli"]
 
 [dependencies]
