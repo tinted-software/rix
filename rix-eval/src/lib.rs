@@ -7,7 +7,7 @@ mod builtins;
 mod error;
 mod eval;
 mod function;
-mod prelude;
+pub mod prelude;
 mod thunk;
 mod value;
 mod xml;

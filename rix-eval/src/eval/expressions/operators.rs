@@ -232,12 +232,15 @@ impl Evaluator {
                     // Special case: /bin + "/" = /bin
                     Ok(NixValue::Path(lhs_path.clone()))
                 } else if let Some(component) = rhs_str.strip_prefix('/') {
-                    // If string starts with "/", treat it as a path component
-                    // e.g., /bin + "/bar" = /bin/bar
                     let mut result = lhs_path.clone();
-                    // Remove leading "/"
-                    if !component.is_empty() {
-                        result.push(component);
+                    for part in component.split('/') {
+                        if part == "." || part.is_empty() {
+                            continue;
+                        } else if part == ".." {
+                            result.pop();
+                        } else {
+                            result.push(part);
+                        }
                     }
                     Ok(NixValue::Path(result))
                 } else {
@@ -245,7 +248,24 @@ impl Evaluator {
                     // Convert path to string, append, then convert back
                     let lhs_str = lhs_path.to_string_lossy();
                     let combined = format!("{}{}", lhs_str, rhs_str);
-                    Ok(NixValue::Path(PathBuf::from(combined)))
+                    let path = PathBuf::from(combined);
+                    let mut result = PathBuf::new();
+                    if path.is_absolute() {
+                        result.push("/");
+                    }
+                    for comp in path.components() {
+                        match comp {
+                            std::path::Component::RootDir | std::path::Component::CurDir => {}
+                            std::path::Component::ParentDir => {
+                                result.pop();
+                            }
+                            std::path::Component::Normal(s) => {
+                                result.push(s);
+                            }
+                            std::path::Component::Prefix(_) => {}
+                        }
+                    }
+                    Ok(NixValue::Path(result))
                 }
             }
             // Path + Path: concatenate two paths
@@ -417,56 +437,107 @@ impl Evaluator {
 
     /// Evaluate equality comparison (`==`)
     pub(crate) fn evaluate_equal(&self, lhs: &NixValue, rhs: &NixValue) -> Result<NixValue> {
-        // Deep force both sides to ensure all nested thunks are evaluated
-        let lhs_deep = lhs.clone().deep_force(self)?;
-        let rhs_deep = rhs.clone().deep_force(self)?;
+        let res = self.evaluate_equal_inner(lhs, rhs, false)?;
+        Ok(NixValue::Boolean(res))
+    }
 
-        let result = match (&lhs_deep, &rhs_deep) {
-            (NixValue::Integer(a), NixValue::Integer(b)) => a == b,
-            (NixValue::Float(a), NixValue::Float(b)) => a == b,
-            (NixValue::Integer(a), NixValue::Float(b)) => (*a as f64) == *b,
-            (NixValue::Float(a), NixValue::Integer(b)) => *a == (*b as f64),
-            (NixValue::String(a), NixValue::String(b)) => a == b,
-            (NixValue::Boolean(a), NixValue::Boolean(b)) => a == b,
-            (NixValue::Null, NixValue::Null) => true,
-            (NixValue::List(a), NixValue::List(b)) => {
-                // Compare lists element by element, forcing thunks
-                if a.len() != b.len() {
-                    false
+    pub(crate) fn evaluate_equal_nested(&self, lhs: &NixValue, rhs: &NixValue) -> Result<NixValue> {
+        let res = self.evaluate_equal_inner(lhs, rhs, true)?;
+        Ok(NixValue::Boolean(res))
+    }
+
+    pub(crate) fn evaluate_equal_inner(
+        &self,
+        lhs: &NixValue,
+        rhs: &NixValue,
+        is_nested: bool,
+    ) -> Result<bool> {
+        if let (NixValue::Thunk(a), NixValue::Thunk(b)) = (lhs, rhs) {
+            if std::sync::Arc::ptr_eq(a, b) {
+                return Ok(true);
+            }
+        }
+
+        if let (NixValue::DeferredLookup(a, _), NixValue::DeferredLookup(b, _)) = (lhs, rhs) {
+            if a == b {
+                return Ok(true);
+            }
+        }
+
+        let lhs_forced = lhs.clone().force(self)?;
+        let rhs_forced = rhs.clone().force(self)?;
+
+        if let (NixValue::Thunk(a), NixValue::Thunk(b)) = (&lhs_forced, &rhs_forced) {
+            if std::sync::Arc::ptr_eq(a, b) {
+                return Ok(true);
+            }
+        }
+
+        if let (NixValue::DeferredLookup(a, _), NixValue::DeferredLookup(b, _)) =
+            (&lhs_forced, &rhs_forced)
+        {
+            if a == b {
+                return Ok(true);
+            }
+        }
+
+        match (&lhs_forced, &rhs_forced) {
+            (NixValue::Integer(a), NixValue::Integer(b)) => Ok(a == b),
+            (NixValue::Float(a), NixValue::Float(b)) => Ok(a == b),
+            (NixValue::Integer(a), NixValue::Float(b)) => Ok((*a as f64) == *b),
+            (NixValue::Float(a), NixValue::Integer(b)) => Ok(*a == (*b as f64)),
+            (NixValue::String(a), NixValue::String(b)) => Ok(a == b),
+            (NixValue::Boolean(a), NixValue::Boolean(b)) => Ok(a == b),
+            (NixValue::Null, NixValue::Null) => Ok(true),
+            (NixValue::Path(a), NixValue::Path(b)) => Ok(a == b),
+            (NixValue::StorePath(a), NixValue::StorePath(b)) => Ok(a == b),
+            (NixValue::Builtin(a), NixValue::Builtin(b)) => Ok(a == b),
+            (NixValue::Derivation(a), NixValue::Derivation(b)) => Ok(std::sync::Arc::ptr_eq(a, b)),
+            (NixValue::Function(a), NixValue::Function(b)) => {
+                if is_nested {
+                    Ok(std::sync::Arc::ptr_eq(a, b))
                 } else {
-                    a.iter().zip(b.iter()).all(|(a_elem, b_elem)| {
-                        // Force thunks in list elements before comparison
-                        match (a_elem.clone().force(self), b_elem.clone().force(self)) {
-                            (Ok(a_val), Ok(b_val)) => a_val == b_val,
-                            _ => false,
-                        }
-                    })
+                    Ok(false)
                 }
+            }
+            (NixValue::List(a), NixValue::List(b)) => {
+                if a.len() != b.len() {
+                    return Ok(false);
+                }
+                for (a_elem, b_elem) in a.iter().zip(b.iter()) {
+                    if !self.evaluate_equal_inner(a_elem, b_elem, true)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
             }
             (NixValue::AttributeSet(a), NixValue::AttributeSet(b)) => {
-                // Compare attribute sets - they're already deeply forced at the top level
-                // But we need to recursively compare nested attribute sets
                 if a.len() != b.len() {
-                    false
-                } else {
-                    a.iter().all(|(key, a_val)| {
-                        if let Some(b_val) = b.get(key) {
-                            // Recursively compare values, handling nested attribute sets
-                            // evaluate_equal will handle deep forcing, so we can call it directly
-                            matches!(
-                                self.evaluate_equal(a_val, b_val),
-                                Ok(NixValue::Boolean(true))
-                            )
-                        } else {
-                            false
-                        }
-                    })
+                    return Ok(false);
                 }
+                for (key, a_val) in a {
+                    if let Some(b_val) = b.get(key) {
+                        if key == "builtins" {
+                            if matches!(a_val, NixValue::DeferredLookup(n, _) if n == "builtins")
+                                || matches!(b_val, NixValue::DeferredLookup(n, _) if n == "builtins")
+                            {
+                                continue;
+                            }
+                        }
+                        if !self.evaluate_equal_inner(a_val, b_val, true)? {
+                            return Ok(false);
+                        }
+                    } else {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
             }
-            (NixValue::Path(a), NixValue::Path(b)) => a == b,
-            _ => false, // Different types are never equal
-        };
-        Ok(NixValue::Boolean(result))
+            (NixValue::DeferredLookup(a_name, _), NixValue::DeferredLookup(b_name, _)) => {
+                Ok(a_name == b_name)
+            }
+            _ => Ok(false),
+        }
     }
 
     /// Evaluate inequality comparison (`!=`)
@@ -499,7 +570,7 @@ impl Evaluator {
                     if let NixValue::Boolean(true) = cmp {
                         return Ok(NixValue::Boolean(true));
                     }
-                    let eq = self.evaluate_equal(&a_val, &b_val)?;
+                    let eq = self.evaluate_equal_nested(&a_val, &b_val)?;
                     if let NixValue::Boolean(false) = eq {
                         // Not equal, and not less, so greater
                         return Ok(NixValue::Boolean(false));
@@ -508,9 +579,7 @@ impl Evaluator {
                 // All elements equal so far - compare lengths
                 a.len() < b.len()
             }
-            (NixValue::Function(a), NixValue::Function(b)) => {
-                Arc::as_ptr(a) < Arc::as_ptr(b)
-            }
+            (NixValue::Function(a), NixValue::Function(b)) => Arc::as_ptr(a) < Arc::as_ptr(b),
             _ => {
                 return Err(Error::UnsupportedExpression {
                     reason: format!("cannot compare {} and {} with <", lhs_deep, rhs_deep),
@@ -541,7 +610,7 @@ impl Evaluator {
                     if let NixValue::Boolean(true) = cmp {
                         return Ok(NixValue::Boolean(true));
                     }
-                    let eq = self.evaluate_equal(&a_val, &b_val)?;
+                    let eq = self.evaluate_equal_nested(&a_val, &b_val)?;
                     if let NixValue::Boolean(false) = eq {
                         // Not equal, and not greater, so less
                         return Ok(NixValue::Boolean(false));
@@ -550,9 +619,7 @@ impl Evaluator {
                 // All elements equal so far - compare lengths
                 a.len() > b.len()
             }
-            (NixValue::Function(a), NixValue::Function(b)) => {
-                Arc::as_ptr(a) > Arc::as_ptr(b)
-            }
+            (NixValue::Function(a), NixValue::Function(b)) => Arc::as_ptr(a) > Arc::as_ptr(b),
             _ => {
                 return Err(Error::UnsupportedExpression {
                     reason: format!("cannot compare {} and {} with >", lhs_deep, rhs_deep),
@@ -587,7 +654,7 @@ impl Evaluator {
                     if let NixValue::Boolean(true) = cmp {
                         return Ok(NixValue::Boolean(true));
                     }
-                    let eq = self.evaluate_equal(&a_val, &b_val)?;
+                    let eq = self.evaluate_equal_nested(&a_val, &b_val)?;
                     if let NixValue::Boolean(false) = eq {
                         // Not equal, and not less, so greater
                         return Ok(NixValue::Boolean(false));
@@ -596,9 +663,7 @@ impl Evaluator {
                 // All elements equal so far - compare lengths
                 a.len() <= b.len()
             }
-            (NixValue::Function(a), NixValue::Function(b)) => {
-                Arc::as_ptr(a) <= Arc::as_ptr(b)
-            }
+            (NixValue::Function(a), NixValue::Function(b)) => Arc::as_ptr(a) <= Arc::as_ptr(b),
             _ => {
                 return Err(Error::UnsupportedExpression {
                     reason: format!("cannot compare {} and {} with <=", lhs_deep, rhs_deep),
@@ -633,7 +698,7 @@ impl Evaluator {
                     if let NixValue::Boolean(true) = cmp {
                         return Ok(NixValue::Boolean(true));
                     }
-                    let eq = self.evaluate_equal(&a_val, &b_val)?;
+                    let eq = self.evaluate_equal_nested(&a_val, &b_val)?;
                     if let NixValue::Boolean(false) = eq {
                         // Not equal, and not greater, so less
                         return Ok(NixValue::Boolean(false));
@@ -642,9 +707,7 @@ impl Evaluator {
                 // All elements equal so far - compare lengths
                 a.len() >= b.len()
             }
-            (NixValue::Function(a), NixValue::Function(b)) => {
-                Arc::as_ptr(a) >= Arc::as_ptr(b)
-            }
+            (NixValue::Function(a), NixValue::Function(b)) => Arc::as_ptr(a) >= Arc::as_ptr(b),
             _ => {
                 return Err(Error::UnsupportedExpression {
                     reason: format!("cannot compare {} and {} with >=", lhs_deep, rhs_deep),

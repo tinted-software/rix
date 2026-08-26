@@ -130,6 +130,54 @@ impl Default for VariableScope {
     }
 }
 
+impl Drop for VariableScope {
+    fn drop(&mut self) {
+        let mut to_drop = Vec::new();
+        for layer in self.layers.drain(..) {
+            match layer {
+                ScopeLayer::Lexical(mut map) => {
+                    for (_, v) in map.drain() {
+                        to_drop.push(v);
+                    }
+                }
+                ScopeLayer::Recursive(mutex) => {
+                    if let Ok(mutex) = Arc::try_unwrap(mutex) {
+                        if let Ok(mut map) = mutex.into_inner() {
+                            for (_, v) in map.drain() {
+                                to_drop.push(v);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        while let Some(v) = to_drop.pop() {
+            if let NixValue::Thunk(thunk) = v {
+                if let Ok(mut thunk_inner) = Arc::try_unwrap(thunk) {
+                    for layer in thunk_inner.closure.layers.drain(..) {
+                        match layer {
+                            ScopeLayer::Lexical(mut map) => {
+                                for (_, v) in map.drain() {
+                                    to_drop.push(v);
+                                }
+                            }
+                            ScopeLayer::Recursive(mutex) => {
+                                if let Ok(mutex) = Arc::try_unwrap(mutex) {
+                                    if let Ok(mut map) = mutex.into_inner() {
+                                        for (_, v) in map.drain() {
+                                            to_drop.push(v);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 impl From<HashMap<String, NixValue>> for VariableScope {
     fn from(vars: HashMap<String, NixValue>) -> Self {
         Self {

@@ -1,9 +1,9 @@
 //! Display and equality implementations for NixValue
 
 use crate::value::NixValue;
+use std::cell::Cell;
 use std::fmt;
 use std::sync::Arc;
-use std::cell::Cell;
 
 thread_local! {
     /// Recursion depth guard for Display to prevent stack overflow on recursive structures
@@ -36,31 +36,71 @@ impl fmt::Display for NixValue {
     }
 }
 
+fn format_nix_float(f: f64) -> String {
+    if f == 0.0 {
+        return "0".to_string();
+    }
+    let abs = f.abs();
+    // Nix/C sprintf("%.6g") format:
+    // Uses scientific notation if exponent is < -4 or >= precision (6).
+    // Otherwise uses standard decimal notation with up to 6 significant digits.
+    if abs >= 1e-4 && abs < 1e6 {
+        // Find how many decimal digits needed for up to 6 significant digits
+        let magnitude = f.abs().log10().floor() as i32;
+        let decimals = (5 - magnitude).max(0) as usize;
+        let s = format!("{:.decimals$}", f, decimals = decimals);
+        if s.contains('.') {
+            let trimmed = s.trim_end_matches('0').trim_end_matches('.');
+            trimmed.to_string()
+        } else {
+            s
+        }
+    } else {
+        // Scientific notation: e+XX or e-XX, 1 digit before decimal point, up to 5 after
+        // e.g. 5e+22, 6.626e-34, 9.22462e+06
+        let s = format!("{:.5e}", f);
+        if let Some((mantissa, exp)) = s.split_once('e') {
+            let trimmed_mantissa = if mantissa.contains('.') {
+                mantissa.trim_end_matches('0').trim_end_matches('.')
+            } else {
+                mantissa
+            };
+            let exp_num: i32 = exp.parse().unwrap_or(0);
+            format!("{}e{:+03}", trimmed_mantissa, exp_num)
+        } else {
+            s
+        }
+    }
+}
+
+fn escape_nix_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '$' if chars.peek() == Some(&'{') => {
+                out.push_str("\\$");
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 impl NixValue {
     fn fmt_inner(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             NixValue::String(s) => {
-                // Escape special characters in strings for display
-                let escaped: String = s
-                    .chars()
-                    .map(|c| match c {
-                        '\n' => "\\n".to_string(),
-                        '\t' => "\\t".to_string(),
-                        '\r' => "\\r".to_string(),
-                        '"' => "\\\"".to_string(),
-                        '\\' => "\\\\".to_string(),
-                        _ => c.to_string(),
-                    })
-                    .collect();
-                write!(f, "\"{}\"", escaped)
+                write!(f, "\"{}\"", escape_nix_string(s))
             }
             NixValue::Integer(i) => write!(f, "{}", i),
             NixValue::Float(fl) => {
-                // Nix displays floats with a maximum of 5 significant digits,
-                // trimming trailing zeros and decimal point.
-                let formatted = format!("{:.5}", fl);
-                let trimmed = formatted.trim_end_matches('0').trim_end_matches('.');
-                write!(f, "{}", trimmed)
+                write!(f, "{}", format_nix_float(*fl))
             }
             NixValue::Boolean(b) => write!(f, "{}", b),
             NixValue::Null => write!(f, "null"),
@@ -85,7 +125,7 @@ impl NixValue {
                         let needs_quoting = needs_quoting || keywords.contains(&k.as_str());
 
                         let key_disp = if needs_quoting {
-                            format!("\"{}\"", k)
+                            format!("\"{}\"", escape_nix_string(k))
                         } else {
                             k.to_string()
                         };

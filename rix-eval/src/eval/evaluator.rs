@@ -267,21 +267,7 @@ impl Evaluator {
     /// Variables in the scope can be referenced in Nix expressions.
     /// Setting a new scope replaces any existing scope.
     ///
-    /// # Arguments
-    ///
-    /// * `scope` - A `VariableScope` (HashMap) mapping variable names to values
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use nix_eval::{Evaluator, NixValue};
-    /// use std::collections::HashMap;
-    ///
-    /// let mut evaluator = Evaluator::new();
-    /// let mut scope = HashMap::new();
-    /// scope.insert("x".to_string(), NixValue::Integer(42));
-    /// scope.insert("y".to_string(), NixValue::String("hello".to_string()));
-    /// evaluator.set_scope(scope);
+    /// Parse NIX_PATH environment variable to populate search paths
     fn parse_nix_path(&mut self) {
         if let Ok(nix_path) = std::env::var("NIX_PATH") {
             for entry in nix_path.split(':') {
@@ -542,16 +528,20 @@ impl Evaluator {
             actual_path = actual_path.join("default.nix");
         }
 
+        // Get canonical path
+        let canonical_path = actual_path
+            .canonicalize()
+            .unwrap_or_else(|_| actual_path.clone());
+
+        if let Some(cached) = self.import_cache.borrow().get(&canonical_path) {
+            return Ok(cached.clone());
+        }
+
         // Read the file
         let code =
             std::fs::read_to_string(&actual_path).map_err(|e| Error::UnsupportedExpression {
                 reason: format!("cannot read file '{}': {}", actual_path.display(), e),
             })?;
-
-        // Get canonical path
-        let canonical_path = actual_path
-            .canonicalize()
-            .unwrap_or_else(|_| actual_path.clone());
 
         // Add file to source map and get file ID
         let file_id = {
@@ -594,7 +584,11 @@ impl Evaluator {
         self.pop_context();
 
         // Fully force the result
-        result.deep_force(self)
+        let evaluated = result.deep_force(self)?;
+        self.import_cache
+            .borrow_mut()
+            .insert(canonical_path, evaluated.clone());
+        Ok(evaluated)
     }
 
     /// Evaluate a parsed Nix expression AST node with a specific scope
@@ -797,24 +791,7 @@ impl Evaluator {
                     && let Some(expr) = root.expr()
                     && let Expr::Lambda(lambda) = expr
                 {
-                    // Extract parameter and body from the lambda
-                    if let Some(param_node) = lambda.param() {
-                        // param is a Param AST node - extract its text as parameter name
-                        let param_text = param_node.syntax().text().to_string();
-                        let parameter = crate::function::Parameter::Simple(param_text);
-                        let body_text = lambda
-                            .body()
-                            .map(|b| b.syntax().text().to_string())
-                            .unwrap_or_default();
-
-                        let func = crate::function::Function::new_curried_builtin_internal(
-                            parameter,
-                            body_text,
-                            thunk.closure().clone(),
-                            None,
-                        );
-                        return Ok(NixValue::Function(std::sync::Arc::new(func)));
-                    }
+                    return self.evaluate_lambda(&lambda, thunk.closure());
                 }
             }
         }
@@ -890,8 +867,6 @@ impl Evaluator {
                 })
             }
             "builtins" => {
-                // Create the builtins attrset with a recursive self-reference.
-                // We use a thunk that when forced, looks up "builtins" recursively.
                 let mut builtins_attrs = HashMap::new();
                 for name in self.builtins.keys() {
                     builtins_attrs.insert(name.clone(), NixValue::Builtin(name.clone()));
@@ -900,19 +875,14 @@ impl Evaluator {
                     "currentSystem".to_string(),
                     NixValue::String("x86_64-linux".to_string()),
                 );
-                // Create the result first (without builtins key)
-                let result = NixValue::AttributeSet(builtins_attrs);
-                // Now create a version with the self-reference added.
-                // We clone the inner map and add "builtins" key pointing to the result.
-                // Note: this means builtins.builtins.builtins works too because
-                // each level's "builtins" key points to the same overall structure.
-                if let NixValue::AttributeSet(ref inner) = result {
-                    let mut with_self = inner.clone();
-                    with_self.insert("builtins".to_string(), result.clone());
-                    Ok(NixValue::AttributeSet(with_self))
-                } else {
-                    unreachable!()
-                }
+                builtins_attrs.insert(
+                    "builtins".to_string(),
+                    NixValue::DeferredLookup(
+                        "builtins".to_string(),
+                        crate::eval::context::VariableScope::new(),
+                    ),
+                );
+                Ok(NixValue::AttributeSet(builtins_attrs))
             }
             _ => {
                 // Check if it's a global builtin (like map, all, filter)
@@ -1118,7 +1088,13 @@ impl crate::value::NixValue {
             NixValue::AttributeSet(mut attrs) => {
                 let mut forced_attrs = HashMap::new();
                 for (key, value) in attrs.drain() {
-                    forced_attrs.insert(key, value.deep_force(evaluator)?);
+                    if key == "builtins"
+                        && matches!(value, NixValue::DeferredLookup(ref name, _) if name == "builtins")
+                    {
+                        forced_attrs.insert(key, value);
+                    } else {
+                        forced_attrs.insert(key, value.deep_force(evaluator)?);
+                    }
                 }
                 Ok(NixValue::AttributeSet(forced_attrs))
             }
