@@ -42,7 +42,8 @@ impl Builtin for ImportBuiltin {
             }
         };
 
-        evaluator.evaluate_from_file(&path)
+        let resolved = evaluator.resolve_path(&path);
+        evaluator.evaluate_from_file(&resolved)
     }
 
     fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
@@ -347,7 +348,7 @@ impl Builtin for ElemBuiltin {
 
         for item in xs {
             let item_forced = item.force(evaluator)?;
-            if evaluator.evaluate_equal(&x, &item_forced)? == NixValue::Boolean(true) {
+            if evaluator.evaluate_equal_nested(&x, &item_forced)? == NixValue::Boolean(true) {
                 return Ok(NixValue::Boolean(true));
             }
         }
@@ -1170,7 +1171,6 @@ impl Builtin for DerivationBuiltin {
                 // - Compute output paths based on the derivation hash
                 // - Handle input derivations and sources properly
                 // - Set up the $out environment variable
-                let _store_path = derivation.write_to_store()?;
 
                 // Compute output paths (simplified - in reality these depend on the derivation hash)
                 // For now, we'll use placeholder paths that would be computed properly
@@ -1743,7 +1743,7 @@ impl Builtin for SortBuiltin {
                 reason: format!("sort takes 2 arguments, got {}", args.len()),
             });
         }
-        let func = args[0].clone();
+        let func = args[0].clone().force(evaluator)?;
         let list_val = args[1].clone().force(evaluator)?;
         match list_val {
             NixValue::List(list) => {
@@ -3306,18 +3306,11 @@ impl Builtin for ReplaceStringsBuiltin {
             }
         };
 
-        // Apply replacements sequentially
-        // Nix's replaceStrings processes replacements in order, applying each pattern globally
-        // Empty strings are handled specially: they insert replacements at boundaries
-        let mut result = s;
-
-        for (from, to) in from_list.iter().zip(to_list.iter()) {
-            // Force each list element
+        let mut from_strs = Vec::new();
+        for from in from_list {
             let from_forced = from.clone().force(evaluator)?;
-            let to_forced = to.clone().force(evaluator)?;
-
-            let from_str = match &from_forced {
-                NixValue::String(s) => s,
+            match from_forced {
+                NixValue::String(s) => from_strs.push(s),
                 _ => {
                     return Err(Error::UnsupportedExpression {
                         reason: format!(
@@ -3326,10 +3319,14 @@ impl Builtin for ReplaceStringsBuiltin {
                         ),
                     });
                 }
-            };
+            }
+        }
 
-            let to_str = match &to_forced {
-                NixValue::String(s) => s,
+        let mut to_strs = Vec::new();
+        for to in to_list {
+            let to_forced = to.clone().force(evaluator)?;
+            match to_forced {
+                NixValue::String(s) => to_strs.push(s),
                 _ => {
                     return Err(Error::UnsupportedExpression {
                         reason: format!(
@@ -3338,14 +3335,42 @@ impl Builtin for ReplaceStringsBuiltin {
                         ),
                     });
                 }
-            };
+            }
+        }
 
-            if from_str.is_empty() {
-                // Empty string: insert replacement at start and end
-                result = format!("{}{}{}", to_str, result, to_str);
-            } else {
-                // Non-empty string: replace all occurrences
-                result = result.replace(from_str, to_str);
+        let mut result = String::new();
+        let mut pos = 0;
+        let s_len = s.len();
+
+        while pos <= s_len {
+            let mut matched = false;
+            for (from_str, to_str) in from_strs.iter().zip(to_strs.iter()) {
+                if s[pos..].starts_with(from_str) {
+                    matched = true;
+                    result.push_str(to_str);
+                    if from_str.is_empty() {
+                        if pos < s_len {
+                            let ch = s[pos..].chars().next().unwrap();
+                            result.push(ch);
+                            pos += ch.len_utf8();
+                        } else {
+                            pos += 1;
+                        }
+                    } else {
+                        pos += from_str.len();
+                    }
+                    break;
+                }
+            }
+
+            if !matched {
+                if pos < s_len {
+                    let ch = s[pos..].chars().next().unwrap();
+                    result.push(ch);
+                    pos += ch.len_utf8();
+                } else {
+                    break;
+                }
             }
         }
 
@@ -3735,19 +3760,32 @@ impl Builtin for SplitVersionBuiltin {
         };
 
         let mut result = Vec::new();
-        let mut current = String::new();
-
-        for ch in version.chars() {
-            if ch.is_alphanumeric() {
-                current.push(ch);
-            } else if !current.is_empty() {
-                result.push(NixValue::String(current.clone()));
-                current.clear();
+        let bytes = version.as_bytes();
+        let mut pos = 0;
+        while pos < bytes.len() {
+            while pos < bytes.len() && (bytes[pos] == b'.' || bytes[pos] == b'-') {
+                pos += 1;
             }
-        }
-
-        if !current.is_empty() {
-            result.push(NixValue::String(current));
+            if pos >= bytes.len() {
+                break;
+            }
+            if bytes[pos].is_ascii_digit() {
+                let start = pos;
+                while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+                    pos += 1;
+                }
+                result.push(NixValue::String(version[start..pos].to_string()));
+            } else {
+                let start = pos;
+                while pos < bytes.len()
+                    && !bytes[pos].is_ascii_digit()
+                    && bytes[pos] != b'.'
+                    && bytes[pos] != b'-'
+                {
+                    pos += 1;
+                }
+                result.push(NixValue::String(version[start..pos].to_string()));
+            }
         }
 
         Ok(NixValue::List(result))

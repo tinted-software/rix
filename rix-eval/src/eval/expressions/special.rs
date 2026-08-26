@@ -41,7 +41,11 @@ impl Evaluator {
                             from.expr().ok_or_else(|| Error::UnsupportedExpression {
                                 reason: "inherit(from) missing expr".to_string(),
                             })?;
-                        let from_val = self.evaluate_expr_with_scope(&from_expr, &rec_scope)?;
+                        let from_val = NixValue::Thunk(Arc::new(thunk::Thunk::new(
+                            &from_expr,
+                            rec_scope.clone(),
+                            file_id,
+                        )));
                         NixValue::DeferredInherit(Box::new(from_val), key.clone())
                     } else {
                         if let Some(v) = scope.get(&key) {
@@ -165,7 +169,11 @@ impl Evaluator {
                             from.expr().ok_or_else(|| Error::UnsupportedExpression {
                                 reason: "inherit(from) missing expr".to_string(),
                             })?;
-                        let from_val = self.evaluate_expr_with_scope(&from_expr, &rec_scope)?;
+                        let from_val = NixValue::Thunk(Arc::new(thunk::Thunk::new(
+                            &from_expr,
+                            rec_scope.clone(),
+                            file_id,
+                        )));
                         NixValue::DeferredInherit(Box::new(from_val), key.clone())
                     } else {
                         if let Some(v) = scope.get(&key) {

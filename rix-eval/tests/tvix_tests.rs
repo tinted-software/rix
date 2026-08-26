@@ -15,6 +15,11 @@ include!(concat!(env!("OUT_DIR"), "/generated_tests.rs"));
 
 /// Helper function to evaluate a test file and compare with expected output
 fn eval_test(code_path: PathBuf, expect_success: bool) {
+    // SAFETY: Single-threaded test execution for setting env var
+    unsafe {
+        std::env::set_var("TEST_VAR", "foo"); // for eval-okay-getenv.nix
+    }
+
     eprintln!("Testing: {}", code_path.display());
 
     assert_eq!(

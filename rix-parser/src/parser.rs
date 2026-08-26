@@ -257,9 +257,10 @@ where
     }
 
     fn expect_ident(&mut self) {
-        if self.expect_peek_any(&[TOKEN_IDENT]).is_some() {
+        if self.expect_peek_any(&[TOKEN_IDENT, TOKEN_OR]).is_some() {
             self.start_node(NODE_IDENT);
-            self.bump();
+            let (_, s) = self.try_next().unwrap();
+            self.manual_bump(s, TOKEN_IDENT);
             self.finish_node()
         }
     }
@@ -342,7 +343,7 @@ where
             self.bump();
         } else {
             loop {
-                match self.expect_peek_any(&[T!['}'], T![...], TOKEN_IDENT]) {
+                match self.expect_peek_any(&[T!['}'], T![...], TOKEN_IDENT, TOKEN_OR]) {
                     Some(T!['}']) => {
                         self.bump();
                         break;
@@ -352,7 +353,7 @@ where
                         self.expect(T!['}']);
                         break;
                     }
-                    Some(TOKEN_IDENT) => {
+                    Some(TOKEN_IDENT) | Some(TOKEN_OR) => {
                         self.start_node(NODE_PAT_ENTRY);
                         self.expect_ident();
                         if let Some(T![?]) = self.peek() {
@@ -546,7 +547,7 @@ where
                 self.bump();
                 self.finish_node();
             }
-            TOKEN_IDENT => {
+            TOKEN_IDENT | TOKEN_OR => {
                 let ident = self.peek_raw().map(|&(_, s)| s);
 
                 match self.peek_ahead(1) {

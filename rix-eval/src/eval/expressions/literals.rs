@@ -8,47 +8,21 @@ use rix_parser::ast::{InterpolPart, Literal, Str};
 
 impl Evaluator {
     pub(crate) fn evaluate_literal(&self, literal: &Literal) -> Result<NixValue> {
-        let text = literal.to_string();
-
-        // Remove quotes from string literals
-        if text.starts_with('"') && text.ends_with('"') {
-            // Basic string unescaping
-            // Handle backslash-newline line continuation first (backslash followed by actual newline)
-            // Then handle other escape sequences
-            let mut unescaped = text[1..text.len() - 1].to_string();
-            // Replace backslash followed by newline with just newline (line continuation)
-            unescaped = unescaped.replace("\\\n", "\n");
-            // Handle other escape sequences
-            unescaped = unescaped
-                .replace("\\n", "\n")
-                .replace("\\t", "\t")
-                .replace("\\\"", "\"")
-                .replace("\\\\", "\\");
-            return Ok(NixValue::String(unescaped));
+        match literal.kind() {
+            rix_parser::ast::LiteralKind::Integer(i) => {
+                let int_val = i.value().map_err(|e| Error::ParseError {
+                    reason: e.to_string(),
+                })?;
+                Ok(NixValue::Integer(int_val))
+            }
+            rix_parser::ast::LiteralKind::Float(f) => {
+                let float_val = f.value().map_err(|e| Error::ParseError {
+                    reason: e.to_string(),
+                })?;
+                Ok(NixValue::Float(float_val))
+            }
+            rix_parser::ast::LiteralKind::Uri(u) => Ok(NixValue::String(u.to_string())),
         }
-
-        // Check for boolean literals
-        if text == "true" {
-            return Ok(NixValue::Boolean(true));
-        }
-        if text == "false" {
-            return Ok(NixValue::Boolean(false));
-        }
-        if text == "null" {
-            return Ok(NixValue::Null);
-        }
-
-        // Try to parse as integer
-        if let Ok(int_val) = text.parse::<i64>() {
-            return Ok(NixValue::Integer(int_val));
-        }
-
-        // Try to parse as float
-        if let Ok(float_val) = text.parse::<f64>() {
-            return Ok(NixValue::Float(float_val));
-        }
-
-        Err(Error::UnsupportedLiteral { literal: text })
     }
 
     pub(crate) fn evaluate_string(

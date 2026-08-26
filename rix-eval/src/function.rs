@@ -34,7 +34,7 @@ pub enum TcoResult {
 /// # Example
 ///
 /// ```no_run
-/// use nix_eval::function::Function;
+/// use nix_eval::Function;
 /// use nix_eval::{Evaluator, NixValue};
 /// use std::collections::HashMap;
 ///
@@ -289,6 +289,106 @@ impl Function {
         &self.closure
     }
 
+    /// Bind an argument to the function parameter and return the new scope
+    pub(crate) fn bind_parameter(
+        &self,
+        evaluator: &Evaluator,
+        argument: &NixValue,
+    ) -> Result<VariableScope> {
+        let mut scope = self.closure.clone();
+        scope.push_lexical();
+        match &self.parameter {
+            Parameter::Simple(name) => {
+                scope.insert(name.clone(), argument.clone());
+            }
+            Parameter::Pattern {
+                name,
+                entries,
+                ellipsis,
+            } => {
+                let arg_forced = argument.clone().force(evaluator)?;
+                let attrs = match arg_forced {
+                    NixValue::AttributeSet(a) => a,
+                    _ => {
+                        return Err(Error::UnsupportedExpression {
+                            reason: format!(
+                                "function expected attribute set as argument, got {}",
+                                arg_forced
+                            ),
+                        });
+                    }
+                };
+
+                let mut arg_bindings = HashMap::new();
+                let shared_arg_map = Arc::new(Mutex::new(HashMap::new()));
+
+                let mut rec_scope = self.closure.clone();
+                rec_scope.push_recursive(shared_arg_map.clone());
+
+                if let Some(n) = name {
+                    let set_val = NixValue::AttributeSet(attrs.clone());
+                    arg_bindings.insert(n.clone(), set_val.clone());
+                    shared_arg_map.lock().unwrap().insert(n.clone(), set_val);
+                }
+
+                for (entry_name, default_text) in entries {
+                    if let Some(val) = attrs.get(entry_name) {
+                        arg_bindings.insert(entry_name.clone(), val.clone());
+                        shared_arg_map
+                            .lock()
+                            .unwrap()
+                            .insert(entry_name.clone(), val.clone());
+                    } else if let Some(text) = default_text {
+                        let thunk = crate::thunk::Thunk::new_from_text(
+                            text.clone(),
+                            rec_scope.clone(),
+                            self.file_id,
+                        );
+                        let val = NixValue::Thunk(Arc::new(thunk));
+                        arg_bindings.insert(entry_name.clone(), val.clone());
+                        shared_arg_map
+                            .lock()
+                            .unwrap()
+                            .insert(entry_name.clone(), val);
+                    } else if !ellipsis {
+                        return Err(Error::UnsupportedExpression {
+                            reason: format!(
+                                "function expected argument '{}' but it was not provided",
+                                entry_name
+                            ),
+                        });
+                    }
+                }
+
+                if !ellipsis {
+                    for entry_name in attrs.keys() {
+                        if !entries.iter().any(|(n, _)| n == entry_name) {
+                            return Err(Error::UnsupportedExpression {
+                                reason: format!(
+                                    "function called with unexpected argument '{}'",
+                                    entry_name
+                                ),
+                            });
+                        }
+                    }
+                }
+
+                {
+                    let mut map = shared_arg_map.lock().unwrap();
+                    for (k, v) in &arg_bindings {
+                        map.insert(k.clone(), v.clone());
+                        scope.insert(k.clone(), v.clone());
+                    }
+                }
+
+                if let Some(name) = name {
+                    scope.insert(name.clone(), argument.clone());
+                }
+            }
+        }
+        Ok(scope)
+    }
+
     /// Apply this function to an argument
     ///
     /// This method evaluates the function body with the argument bound to the parameter.
@@ -484,100 +584,7 @@ impl Function {
         }
 
         // Create a new scope that merges the closure with the argument binding
-        // The parameter shadows any variable with the same name in the closure
-        let mut scope = self.closure.clone();
-        scope.push_lexical();
-        match &self.parameter {
-            Parameter::Simple(name) => {
-                scope.insert(name.clone(), argument.clone());
-            }
-            Parameter::Pattern {
-                name,
-                entries,
-                ellipsis,
-            } => {
-                // If it's a pattern, we need to bind the entries
-                let arg_forced = argument.clone().force(evaluator)?;
-                let attrs = match arg_forced {
-                    NixValue::AttributeSet(a) => a,
-                    _ => {
-                        return Err(Error::UnsupportedExpression {
-                            reason: format!(
-                                "function expected attribute set as argument, got {}",
-                                arg_forced
-                            ),
-                        });
-                    }
-                };
-
-                // Create a shared recursive map for the arguments
-                // This allows default expressions to refer to other arguments in the same pattern
-                let mut arg_bindings = HashMap::new();
-                let shared_arg_map = Arc::new(Mutex::new(HashMap::new()));
-
-                // Create a recursive scope that includes these arguments
-                let mut rec_scope = self.closure.clone();
-                rec_scope.push_recursive(shared_arg_map.clone());
-
-                // Handle the @ name if it exists
-                if let Some(n) = name {
-                    arg_bindings.insert(n.clone(), argument.clone());
-                    shared_arg_map
-                        .lock()
-                        .unwrap()
-                        .insert(n.clone(), argument.clone());
-                }
-
-                for (entry_name, default_text) in entries {
-                    if let Some(val) = attrs.get(entry_name) {
-                        arg_bindings.insert(entry_name.clone(), val.clone());
-                    } else if let Some(text) = default_text {
-                        // Use default value (evaluated lazily in the recursive scope)
-                        let thunk = crate::thunk::Thunk::new_from_text(
-                            text.clone(),
-                            rec_scope.clone(),
-                            self.file_id,
-                        );
-                        arg_bindings.insert(entry_name.clone(), NixValue::Thunk(Arc::new(thunk)));
-                    } else if !ellipsis {
-                        // Missing required argument and no ellipsis
-                        return Err(Error::UnsupportedExpression {
-                            reason: format!(
-                                "function expected argument '{}' but it was not provided",
-                                entry_name
-                            ),
-                        });
-                    }
-                }
-
-                // Check for unexpected arguments if no ellipsis
-                if !ellipsis {
-                    for entry_name in attrs.keys() {
-                        if !entries.iter().any(|(n, _)| n == entry_name) {
-                            return Err(Error::UnsupportedExpression {
-                                reason: format!(
-                                    "function called with unexpected argument '{}'",
-                                    entry_name
-                                ),
-                            });
-                        }
-                    }
-                }
-
-                // Update shared_arg_map for recursion and merge into scope
-                {
-                    let mut map = shared_arg_map.lock().unwrap();
-                    for (k, v) in &arg_bindings {
-                        map.insert(k.clone(), v.clone());
-                        scope.insert(k.clone(), v.clone());
-                    }
-                }
-
-                if let Some(name) = name {
-                    scope.insert(name.clone(), argument.clone());
-                }
-            }
-        }
+        let scope = self.bind_parameter(evaluator, &argument)?;
 
         // Evaluate the body expression with TCO support using a trampoline loop
         let mut current_func = std::sync::Arc::new(self.clone());
@@ -651,7 +658,8 @@ impl Function {
                                 }
                                 _ => {
                                     return Err(Error::UnsupportedExpression {
-                                        reason: "foldl': operator must be curried (take 2 args)".to_string(),
+                                        reason: "foldl': operator must be curried (take 2 args)"
+                                            .to_string(),
                                     });
                                 }
                             };
@@ -661,14 +669,21 @@ impl Function {
                 }
             }
 
-            if current_func.body_text.starts_with("__curried_builtin_call:") {
+            if current_func
+                .body_text
+                .starts_with("__curried_builtin_call:")
+            {
                 let builtin_name = &current_func.body_text[23..];
-                if let Some(builtin_marker) = current_func.closure.get(&format!("__builtin_{}", builtin_name)) {
+                if let Some(builtin_marker) = current_func
+                    .closure
+                    .get(&format!("__builtin_{}", builtin_name))
+                {
                     if let NixValue::Builtin(_) = builtin_marker {
                         if let Some(builtin) = evaluator.get_builtin(builtin_name) {
                             // Collect args from closure
                             let mut args = Vec::new();
-                            if let Some(first_arg) = current_func.closure.get("__curried_first_arg") {
+                            if let Some(first_arg) = current_func.closure.get("__curried_first_arg")
+                            {
                                 args.push(first_arg.clone());
                             } else {
                                 let arg_count = current_func
@@ -680,7 +695,9 @@ impl Function {
                                     })
                                     .unwrap_or(0);
                                 for i in 1..=arg_count {
-                                    if let Some(arg) = current_func.closure.get(&format!("__curried_arg{}", i)) {
+                                    if let Some(arg) =
+                                        current_func.closure.get(&format!("__curried_arg{}", i))
+                                    {
                                         args.push(arg.clone());
                                     }
                                 }
@@ -700,7 +717,8 @@ impl Function {
                                         NixValue::Builtin(builtin_name.to_string()),
                                     );
                                     for (i, arg) in args.iter().enumerate() {
-                                        closure.insert(format!("__curried_arg{}", i + 1), arg.clone());
+                                        closure
+                                            .insert(format!("__curried_arg{}", i + 1), arg.clone());
                                     }
                                     closure.insert(
                                         "__curried_arg_count".to_string(),
@@ -753,40 +771,11 @@ impl Function {
             evaluator.pop_context();
 
             match result? {
-                TcoResult::Value(v) => return Ok(v),
+                TcoResult::Value(v) => return v.force(evaluator),
                 TcoResult::TailCall { func, arg } => {
-                    // Force the argument to avoid building up a lazy thunk chain
-                    let arg_forced = arg.clone().force(evaluator)?;
-                    current_arg = arg_forced.clone();
-                    // Prepare for the next iteration:
-                    // Create new scope binding the tail-called function's parameter to the argument
+                    current_arg = arg.clone();
                     current_func = func;
-                    let mut new_scope = current_func.closure.clone();
-                    new_scope.push_lexical();
-                    match &current_func.parameter {
-                        Parameter::Simple(name) => {
-                            new_scope.insert(name.clone(), arg_forced);
-                        }
-                        Parameter::Pattern { .. } => {
-                            let attrs = match arg_forced {
-                                NixValue::AttributeSet(a) => a,
-                                _ => {
-                                    return Err(Error::UnsupportedExpression {
-                                        reason: "TCO: tail call argument must be an attribute set for pattern parameters".to_string(),
-                                    });
-                                }
-                            };
-                            for (entry_name, _) in &match &current_func.parameter {
-                                Parameter::Pattern { entries, .. } => entries.clone(),
-                                _ => vec![],
-                            } {
-                                if let Some(val) = attrs.get(entry_name) {
-                                    new_scope.insert(entry_name.clone(), val.clone());
-                                }
-                            }
-                        }
-                    }
-                    current_scope = new_scope;
+                    current_scope = current_func.bind_parameter(evaluator, &arg)?;
                     current_file_id = current_func.file_id;
                     // Loop to evaluate the new function body
                 }

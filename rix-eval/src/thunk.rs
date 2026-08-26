@@ -35,12 +35,11 @@ pub enum ThunkState {
 /// # Example
 ///
 /// ```no_run
-/// use nix_eval::thunk::Thunk;
-/// use nix_eval::{Expr, VariableScope};
-/// use std::collections::HashMap;
+/// use nix_eval::Thunk;
+/// use nix_eval::VariableScope;
 ///
 /// // Create a thunk for a simple expression
-/// let scope: VariableScope = HashMap::new();
+/// let scope = VariableScope::new();
 /// // Note: In practice, you'd create this from an actual Expr node
 /// ```
 #[derive(Debug, Clone)]
@@ -49,7 +48,7 @@ pub struct Thunk {
     /// We store the syntax node text representation for now, as Expr has lifetime constraints
     expression_text: String,
     /// The lexical closure (variable scope) at thunk creation time
-    closure: VariableScope,
+    pub(crate) closure: VariableScope,
     /// The file_id context at thunk creation time (for resolving relative imports)
     /// This is critical for lazy evaluation: when a thunk is forced, it needs to know
     /// what file it was created in so that relative imports work correctly.

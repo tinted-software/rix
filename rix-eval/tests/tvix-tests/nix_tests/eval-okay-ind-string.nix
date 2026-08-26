@@ -1,4 +1,5 @@
 let
+
   s1 = ''
     This is an indented multi-line string
     literal.  An amount of whitespace at
@@ -15,23 +16,19 @@ let
     it doesn't matter).
   '';
 
-  s2 = ''    If the string starts with whitespace
-      followed by a newline, it's stripped, but
-      that's not the case here. Two spaces are
-      stripped because of the "  " at the start.
+  s2 = ''  If the string starts with whitespace
+    followed by a newline, it's stripped, but
+    that's not the case here. Two spaces are
+    stripped because of the "  " at the start. 
   '';
 
   s3 = ''
-    This line is indented
-    a bit further.
-  ''; # indentation of last line doesn't count if it's empty
+      This line is indented
+      a bit further.
+        ''; # indentation of last line doesn't count if it's empty
 
   s4 = ''
-    Anti-quotations, like ${
-      if true
-      then "so"
-      else "not so"
-    }, are
+    Anti-quotations, like ${if true then "so" else "not so"}, are
     also allowed.
   '';
 
@@ -43,11 +40,11 @@ let
     If you want them, use anti-quotations: ${"''"}, ${"\${"}.
   '';
 
-  s6 = ''
-      Tabs are not interpreted as whitespace (since we can't guess
-      what tab settings are intended), so don't use them.
-    This line starts with a space and a tab, so only one
-      space will be stripped from each line.
+  s6 = ''  
+    Tabs are not interpreted as whitespace (since we can't guess
+    what tab settings are intended), so don't use them.
+ 	This line starts with a space and a tab, so only one
+    space will be stripped from each line.
   '';
 
   s7 = ''
@@ -62,9 +59,9 @@ let
   '';
 
   s9 = ''
-    ${""}  Similarly you can force an indentation level,
-      in this case to 2 spaces.  This works because the anti-quote
-      is significant (not whitespace).
+  ${""}  Similarly you can force an indentation level,
+    in this case to 2 spaces.  This works because the anti-quote
+    is significant (not whitespace).
   '';
 
   s10 = ''
@@ -72,24 +69,23 @@ let
 
   s11 = '''';
 
-  s12 = '''';
+  s12 = ''   '';
 
   s13 = ''
     start on network-interfaces
 
     start script
-
+    
       rm -f /var/run/opengl-driver
-      ${
-      if true
-      then "ln -sf 123 /var/run/opengl-driver"
-      else if true
-      then "ln -sf 456 /var/run/opengl-driver"
-      else ""
-    }
+      ${if true
+        then "ln -sf 123 /var/run/opengl-driver"
+        else if true
+        then "ln -sf 456 /var/run/opengl-driver"
+        else ""
+      }
 
       rm -f /var/log/slim.log
-
+       
     end script
 
     env SLIM_CFGFILE=${"abc"}
@@ -98,13 +94,12 @@ let
     env XKB_BINDIR=${"foo"}/bin         				# Needed for the Xkb extension.
     env LD_LIBRARY_PATH=${"libX11"}/lib:${"libXext"}/lib:/usr/lib/          # related to xorg-sys-opengl - needed to load libglx for (AI)GLX support (for compiz)
 
-    ${
-      if true
+    ${if true
       then "env XORG_DRI_DRIVER_PATH=${"nvidiaDrivers"}/X11R6/lib/modules/drivers/"
-      else if true
+    else if true
       then "env XORG_DRI_DRIVER_PATH=${"mesa"}/lib/modules/dri"
       else ""
-    }
+    } 
 
     exec ${"slim"}/bin/slim
   '';
@@ -116,9 +111,7 @@ let
   '';
 
   # Regression test: string interpolation in '${x}' should work, but didn't.
-  s15 = let
-    x = "bla";
-  in ''
+  s15 = let x = "bla"; in ''
     foo
     '${x}'
     bar
@@ -129,7 +122,7 @@ let
     cut -d $'\t' -f 1
   '';
 
-  # Accept dollars at end of strings
+  # Accept dollars at end of strings 
   s17 = ''ending dollar $'' + ''$'' + "\n";
-in
-  s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8 + s9 + s10 + s11 + s12 + s13 + s14 + s15 + s16 + s17
+
+in s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8 + s9 + s10 + s11 + s12 + s13 + s14 + s15 + s16 + s17
