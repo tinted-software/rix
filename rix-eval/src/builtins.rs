@@ -4272,3 +4272,499 @@ impl HashFileBuiltin {
         Ok(NixValue::String(result))
     }
 }
+
+// -----------------------------------------------------------------------------
+// Network & VCS Fetch Builtins (gitoxide + reqwest w/ rustls)
+// -----------------------------------------------------------------------------
+
+fn get_rix_cache_dir(sub: &str) -> std::path::PathBuf {
+    if let Ok(dir) = std::env::var("RIX_CACHE_DIR") {
+        std::path::PathBuf::from(dir).join(sub)
+    } else if let Ok(home) = std::env::var("HOME") {
+        std::path::PathBuf::from(home)
+            .join(".cache")
+            .join("rix")
+            .join(sub)
+    } else {
+        std::env::temp_dir().join("rix-cache").join(sub)
+    }
+}
+
+fn clone_shallow_repo(
+    url: &str,
+    ref_name: Option<&str>,
+    target_dir: &std::path::Path,
+) -> Result<(String, String)> {
+    let mut prepare = gix::prepare_clone(url.to_string(), target_dir)
+        .map_err(|e| Error::UnsupportedExpression {
+            reason: format!("fetchGit: failed to prepare clone from '{}': {}", url, e),
+        })?
+        .with_shallow(gix::remote::fetch::Shallow::DepthAtRemote(
+            std::num::NonZeroU32::new(1).unwrap(),
+        ))
+        .configure_remote(|remote| Ok(remote.with_fetch_tags(gix::remote::fetch::Tags::None)));
+
+    if let Some(r) = ref_name {
+        prepare = prepare
+            .with_ref_name(Some(r))
+            .map_err(|e| Error::UnsupportedExpression {
+                reason: format!("fetchGit: invalid ref name '{}': {}", r, e),
+            })?;
+    }
+    let (mut checkout, _) = prepare
+        .fetch_then_checkout(
+            gix::progress::Discard,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .map_err(|e| Error::UnsupportedExpression {
+            reason: format!("fetchGit: failed to fetch from '{}': {}", url, e),
+        })?;
+    let (repo, _) = checkout
+        .main_worktree(
+            gix::progress::Discard,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .map_err(|e| Error::UnsupportedExpression {
+            reason: format!("fetchGit: failed to checkout from '{}': {}", url, e),
+        })?;
+
+    let head_id = repo.head_id().map_err(|e| Error::UnsupportedExpression {
+        reason: format!("fetchGit: failed to get HEAD for '{}': {}", url, e),
+    })?;
+    let sha = head_id.to_string();
+    let short = sha.chars().take(7).collect::<String>();
+    Ok((sha, short))
+}
+
+pub struct FetchGitBuiltin;
+
+impl Builtin for FetchGitBuiltin {
+    fn name(&self) -> &str {
+        "fetchGit"
+    }
+
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
+        if args.is_empty() || args.len() > 1 {
+            return Err(Error::UnsupportedExpression {
+                reason: format!("fetchGit takes 1 argument, got {}", args.len()),
+            });
+        }
+
+        let forced = args[0].clone().force(evaluator)?;
+        let (url, rev, ref_name, submodules) = match forced {
+            NixValue::String(s) => (s, None, None, false),
+            NixValue::AttributeSet(map) => {
+                let url = match map.get("url") {
+                    Some(val) => match val.clone().force(evaluator)? {
+                        NixValue::String(s) => s,
+                        other => {
+                            return Err(Error::UnsupportedExpression {
+                                reason: format!("fetchGit: url must be a string, got {}", other),
+                            });
+                        }
+                    },
+                    None => {
+                        return Err(Error::UnsupportedExpression {
+                            reason: "fetchGit: missing 'url' attribute".to_string(),
+                        });
+                    }
+                };
+                let rev = match map.get("rev") {
+                    Some(val) => match val.clone().force(evaluator)? {
+                        NixValue::String(s) => Some(s),
+                        _ => None,
+                    },
+                    None => None,
+                };
+                let ref_name = match map.get("ref") {
+                    Some(val) => match val.clone().force(evaluator)? {
+                        NixValue::String(s) => Some(s),
+                        _ => None,
+                    },
+                    None => None,
+                };
+                let submodules = match map.get("submodules") {
+                    Some(val) => match val.clone().force(evaluator)? {
+                        NixValue::Boolean(b) => b,
+                        _ => false,
+                    },
+                    None => false,
+                };
+                (url, rev, ref_name, submodules)
+            }
+            other => {
+                return Err(Error::UnsupportedExpression {
+                    reason: format!(
+                        "fetchGit: argument must be a string or attribute set, got {}",
+                        other
+                    ),
+                });
+            }
+        };
+
+        // Cache directory key based on url + rev/ref
+        let cache_key = {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(url.as_bytes());
+            if let Some(r) = &rev {
+                hasher.update(b":rev:");
+                hasher.update(r.as_bytes());
+            }
+            if let Some(rf) = &ref_name {
+                hasher.update(b":ref:");
+                hasher.update(rf.as_bytes());
+            }
+            hex::encode(hasher.finalize())
+        };
+
+        let git_cache = get_rix_cache_dir("git");
+        let target_dir = git_cache.join(&cache_key);
+
+        let (commit_sha, short_sha) = if target_dir.exists() && target_dir.join(".git").exists() {
+            // Cache hit, open repo
+            let valid = gix::open(&target_dir).ok().and_then(|r| {
+                r.head_id().ok().map(|h| {
+                    let sha = h.to_string();
+                    let short = sha.chars().take(7).collect::<String>();
+                    (sha, short)
+                })
+            });
+            match valid {
+                Some((sha, short)) => (sha, short),
+                None => {
+                    let _ = std::fs::remove_dir_all(&target_dir);
+                    clone_shallow_repo(&url, ref_name.as_deref(), &target_dir)?
+                }
+            }
+        } else {
+            let _ = std::fs::create_dir_all(&git_cache);
+            let _ = std::fs::remove_dir_all(&target_dir);
+            clone_shallow_repo(&url, ref_name.as_deref(), &target_dir)?
+        };
+
+        let mut result_map = HashMap::new();
+        result_map.insert("outPath".to_string(), NixValue::Path(target_dir));
+        result_map.insert("rev".to_string(), NixValue::String(commit_sha));
+        result_map.insert("shortRev".to_string(), NixValue::String(short_sha));
+        result_map.insert("submodules".to_string(), NixValue::Boolean(submodules));
+
+        Ok(NixValue::AttributeSet(result_map))
+    }
+
+    fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
+        Err(Error::UnsupportedExpression {
+            reason: "fetchGit requires evaluator context".to_string(),
+        })
+    }
+}
+
+pub struct FetchurlBuiltin;
+
+impl Builtin for FetchurlBuiltin {
+    fn name(&self) -> &str {
+        "fetchurl"
+    }
+
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
+        if args.is_empty() || args.len() > 1 {
+            return Err(Error::UnsupportedExpression {
+                reason: format!("fetchurl takes 1 argument, got {}", args.len()),
+            });
+        }
+
+        let forced = args[0].clone().force(evaluator)?;
+        let (url, expected_sha256) = match forced {
+            NixValue::String(s) => (s, None),
+            NixValue::AttributeSet(map) => {
+                let url = match map.get("url") {
+                    Some(val) => match val.clone().force(evaluator)? {
+                        NixValue::String(s) => s,
+                        other => {
+                            return Err(Error::UnsupportedExpression {
+                                reason: format!("fetchurl: url must be a string, got {}", other),
+                            });
+                        }
+                    },
+                    None => {
+                        return Err(Error::UnsupportedExpression {
+                            reason: "fetchurl: missing 'url' attribute".to_string(),
+                        });
+                    }
+                };
+                let sha256 = match map.get("sha256") {
+                    Some(val) => match val.clone().force(evaluator)? {
+                        NixValue::String(s) => Some(s),
+                        _ => None,
+                    },
+                    None => None,
+                };
+                (url, sha256)
+            }
+            other => {
+                return Err(Error::UnsupportedExpression {
+                    reason: format!(
+                        "fetchurl: argument must be string or attribute set, got {}",
+                        other
+                    ),
+                });
+            }
+        };
+
+        let file_cache = get_rix_cache_dir("files");
+        std::fs::create_dir_all(&file_cache).map_err(Error::IoError)?;
+
+        let hash_key = {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(url.as_bytes());
+            if let Some(s) = &expected_sha256 {
+                hasher.update(s.as_bytes());
+            }
+            hex::encode(hasher.finalize())
+        };
+
+        let target_file = file_cache.join(&hash_key);
+        if !target_file.exists() {
+            let client = reqwest::blocking::Client::builder()
+                .use_rustls_tls()
+                .build()
+                .map_err(|e| Error::UnsupportedExpression {
+                    reason: format!("fetchurl: failed to build HTTP client: {}", e),
+                })?;
+            let resp = client
+                .get(&url)
+                .send()
+                .map_err(|e| Error::UnsupportedExpression {
+                    reason: format!("fetchurl: failed to download '{}': {}", url, e),
+                })?;
+            let bytes = resp.bytes().map_err(|e| Error::UnsupportedExpression {
+                reason: format!("fetchurl: failed to read response from '{}': {}", url, e),
+            })?;
+
+            if let Some(expected) = &expected_sha256 {
+                use sha2::{Digest, Sha256};
+                let mut hasher = Sha256::new();
+                hasher.update(&bytes);
+                let actual = hex::encode(hasher.finalize());
+                if &actual != expected {
+                    return Err(Error::UnsupportedExpression {
+                        reason: format!(
+                            "fetchurl: sha256 mismatch for '{}': expected {}, got {}",
+                            url, expected, actual
+                        ),
+                    });
+                }
+            }
+            std::fs::write(&target_file, bytes).map_err(Error::IoError)?;
+        }
+
+        Ok(NixValue::Path(target_file))
+    }
+
+    fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
+        Err(Error::UnsupportedExpression {
+            reason: "fetchurl requires evaluator context".to_string(),
+        })
+    }
+}
+
+pub struct FetchTarballBuiltin;
+
+impl Builtin for FetchTarballBuiltin {
+    fn name(&self) -> &str {
+        "fetchTarball"
+    }
+
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
+        if args.is_empty() || args.len() > 1 {
+            return Err(Error::UnsupportedExpression {
+                reason: format!("fetchTarball takes 1 argument, got {}", args.len()),
+            });
+        }
+
+        let forced = args[0].clone().force(evaluator)?;
+        let (url, expected_sha256) = match forced {
+            NixValue::String(s) => (s, None),
+            NixValue::AttributeSet(map) => {
+                let url = match map.get("url") {
+                    Some(val) => match val.clone().force(evaluator)? {
+                        NixValue::String(s) => s,
+                        other => {
+                            return Err(Error::UnsupportedExpression {
+                                reason: format!(
+                                    "fetchTarball: url must be a string, got {}",
+                                    other
+                                ),
+                            });
+                        }
+                    },
+                    None => {
+                        return Err(Error::UnsupportedExpression {
+                            reason: "fetchTarball: missing 'url' attribute".to_string(),
+                        });
+                    }
+                };
+                let sha256 = match map.get("sha256") {
+                    Some(val) => match val.clone().force(evaluator)? {
+                        NixValue::String(s) => Some(s),
+                        _ => None,
+                    },
+                    None => None,
+                };
+                (url, sha256)
+            }
+            other => {
+                return Err(Error::UnsupportedExpression {
+                    reason: format!(
+                        "fetchTarball: argument must be string or attribute set, got {}",
+                        other
+                    ),
+                });
+            }
+        };
+
+        let tarball_cache = get_rix_cache_dir("tarballs");
+        std::fs::create_dir_all(&tarball_cache).map_err(Error::IoError)?;
+
+        let hash_key = {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(url.as_bytes());
+            if let Some(s) = &expected_sha256 {
+                hasher.update(s.as_bytes());
+            }
+            hex::encode(hasher.finalize())
+        };
+
+        let target_dir = tarball_cache.join(&hash_key);
+        if !target_dir.exists() {
+            let client = reqwest::blocking::Client::builder()
+                .use_rustls_tls()
+                .build()
+                .map_err(|e| Error::UnsupportedExpression {
+                    reason: format!("fetchTarball: failed to build HTTP client: {}", e),
+                })?;
+            let resp = client
+                .get(&url)
+                .send()
+                .map_err(|e| Error::UnsupportedExpression {
+                    reason: format!("fetchTarball: failed to download '{}': {}", url, e),
+                })?;
+            let bytes = resp.bytes().map_err(|e| Error::UnsupportedExpression {
+                reason: format!(
+                    "fetchTarball: failed to read response from '{}': {}",
+                    url, e
+                ),
+            })?;
+
+            if let Some(expected) = &expected_sha256 {
+                use sha2::{Digest, Sha256};
+                let mut hasher = Sha256::new();
+                hasher.update(&bytes);
+                let actual = hex::encode(hasher.finalize());
+                if &actual != expected {
+                    return Err(Error::UnsupportedExpression {
+                        reason: format!(
+                            "fetchTarball: sha256 mismatch for '{}': expected {}, got {}",
+                            url, expected, actual
+                        ),
+                    });
+                }
+            }
+
+            let tar_gz = flate2::read::GzDecoder::new(&bytes[..]);
+            let mut archive = tar::Archive::new(tar_gz);
+            let temp_dir = tarball_cache.join(format!("{}.tmp", &hash_key));
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            std::fs::create_dir_all(&temp_dir).map_err(Error::IoError)?;
+            archive.unpack(&temp_dir).map_err(Error::IoError)?;
+
+            // If the unpacked directory contains a single top-level directory, strip it
+            let entries = std::fs::read_dir(&temp_dir)
+                .map_err(Error::IoError)?
+                .filter_map(|e| e.ok())
+                .collect::<Vec<_>>();
+            if entries.len() == 1 && entries[0].path().is_dir() {
+                std::fs::rename(entries[0].path(), &target_dir).map_err(Error::IoError)?;
+                let _ = std::fs::remove_dir_all(&temp_dir);
+            } else {
+                std::fs::rename(&temp_dir, &target_dir).map_err(Error::IoError)?;
+            }
+        }
+
+        Ok(NixValue::Path(target_dir))
+    }
+
+    fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
+        Err(Error::UnsupportedExpression {
+            reason: "fetchTarball requires evaluator context".to_string(),
+        })
+    }
+}
+
+pub struct FetchTreeBuiltin;
+
+impl Builtin for FetchTreeBuiltin {
+    fn name(&self) -> &str {
+        "fetchTree"
+    }
+
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
+        if args.is_empty() || args.len() > 1 {
+            return Err(Error::UnsupportedExpression {
+                reason: format!("fetchTree takes 1 argument, got {}", args.len()),
+            });
+        }
+
+        let forced = args[0].clone().force(evaluator)?;
+        match forced {
+            NixValue::String(s) => {
+                FetchGitBuiltin.call_with_evaluator(&[NixValue::String(s)], evaluator)
+            }
+            NixValue::AttributeSet(map) => {
+                let fetch_type = match map.get("type") {
+                    Some(val) => match val.clone().force(evaluator)? {
+                        NixValue::String(s) => s,
+                        _ => "git".to_string(),
+                    },
+                    None => "git".to_string(),
+                };
+
+                match fetch_type.as_str() {
+                    "git" => FetchGitBuiltin
+                        .call_with_evaluator(&[NixValue::AttributeSet(map)], evaluator),
+                    "tarball" => {
+                        let path_val = FetchTarballBuiltin
+                            .call_with_evaluator(&[NixValue::AttributeSet(map)], evaluator)?;
+                        let mut res = HashMap::new();
+                        res.insert("outPath".to_string(), path_val);
+                        Ok(NixValue::AttributeSet(res))
+                    }
+                    "file" => {
+                        let path_val = FetchurlBuiltin
+                            .call_with_evaluator(&[NixValue::AttributeSet(map)], evaluator)?;
+                        let mut res = HashMap::new();
+                        res.insert("outPath".to_string(), path_val);
+                        Ok(NixValue::AttributeSet(res))
+                    }
+                    other => Err(Error::UnsupportedExpression {
+                        reason: format!("fetchTree: unsupported type '{}'", other),
+                    }),
+                }
+            }
+            other => Err(Error::UnsupportedExpression {
+                reason: format!(
+                    "fetchTree: argument must be string or attribute set, got {}",
+                    other
+                ),
+            }),
+        }
+    }
+
+    fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
+        Err(Error::UnsupportedExpression {
+            reason: "fetchTree requires evaluator context".to_string(),
+        })
+    }
+}

@@ -56,8 +56,19 @@ impl Evaluator {
                             NixValue::Path(p) => p.display().to_string(),
                             NixValue::StorePath(p) => p.clone(),
                             NixValue::Derivation(drv) => format!("<derivation {}>", drv.name),
+                            NixValue::AttributeSet(ref attrs) => {
+                                if let Some(out_path) = attrs.get("outPath") {
+                                    let forced = out_path.clone().force(self)?;
+                                    match forced {
+                                        NixValue::String(s) => s,
+                                        NixValue::Path(p) => p.display().to_string(),
+                                        _ => format!("{}", forced),
+                                    }
+                                } else {
+                                    format!("{}", value_forced)
+                                }
+                            }
                             NixValue::List(_)
-                            | NixValue::AttributeSet(_)
                             | NixValue::Thunk(_)
                             | NixValue::DeferredLookup(_, _)
                             | NixValue::DeferredInherit(_, _)
