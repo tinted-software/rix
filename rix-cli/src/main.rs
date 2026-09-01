@@ -1,7 +1,6 @@
 use clap::Parser;
 use nix_eval::Evaluator;
 use rootcause::{Report, report};
-use std::fs;
 use std::io::{self, Read};
 
 /// A pure Rust Nix expression evaluator
@@ -24,26 +23,26 @@ struct Args {
 fn main() -> Result<(), Report> {
     let args = Args::parse();
 
-    // Get the Nix expression to evaluate
-    let expr = if args.file {
-        // Read from file
+    // Create evaluator
+    let evaluator = Evaluator::new();
+
+    let value = if args.file {
         let path = args
             .expression
             .ok_or_else(|| report!("File path required when using --file"))?;
-        fs::read_to_string(&path)?
-    } else if let Some(expr) = args.expression {
-        // Use provided expression
-        expr
+        evaluator
+            .evaluate_from_file(std::path::Path::new(&path))
+            .map_err(|e| report!("{}", e))?
     } else {
-        // Read from stdin
-        let mut buffer = String::new();
-        io::stdin().read_to_string(&mut buffer)?;
-        buffer
+        let expr = if let Some(expr) = args.expression {
+            expr
+        } else {
+            let mut buffer = String::new();
+            io::stdin().read_to_string(&mut buffer)?;
+            buffer
+        };
+        evaluator.evaluate(&expr).map_err(|e| report!("{}", e))?
     };
-
-    // Create evaluator and evaluate
-    let evaluator = Evaluator::new();
-    let value = evaluator.evaluate(&expr).map_err(|e| report!("{}", e))?;
 
     // Output the result
     if args.json {

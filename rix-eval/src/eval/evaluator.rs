@@ -180,6 +180,10 @@ impl Evaluator {
         self.register_builtin(Box::new(crate::builtins::FromTOMLBuiltin));
         self.register_builtin(Box::new(crate::builtins::GetEnvBuiltin));
         self.register_builtin(Box::new(crate::builtins::HashFileBuiltin));
+        self.register_builtin(Box::new(crate::builtins::FetchGitBuiltin));
+        self.register_builtin(Box::new(crate::builtins::FetchurlBuiltin));
+        self.register_builtin(Box::new(crate::builtins::FetchTarballBuiltin));
+        self.register_builtin(Box::new(crate::builtins::FetchTreeBuiltin));
     }
 
     /// Get a builtin function by name
