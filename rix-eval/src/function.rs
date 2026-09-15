@@ -677,68 +677,64 @@ impl Function {
                 if let Some(builtin_marker) = current_func
                     .closure
                     .get(&format!("__builtin_{}", builtin_name))
+                    && let NixValue::Builtin(_) = builtin_marker
+                    && let Some(builtin) = evaluator.get_builtin(builtin_name)
                 {
-                    if let NixValue::Builtin(_) = builtin_marker {
-                        if let Some(builtin) = evaluator.get_builtin(builtin_name) {
-                            // Collect args from closure
-                            let mut args = Vec::new();
-                            if let Some(first_arg) = current_func.closure.get("__curried_first_arg")
+                    // Collect args from closure
+                    let mut args = Vec::new();
+                    if let Some(first_arg) = current_func.closure.get("__curried_first_arg") {
+                        args.push(first_arg.clone());
+                    } else {
+                        let arg_count = current_func
+                            .closure
+                            .get("__curried_arg_count")
+                            .and_then(|v| match v {
+                                NixValue::Integer(n) => Some(n as usize),
+                                _ => None,
+                            })
+                            .unwrap_or(0);
+                        for i in 1..=arg_count {
+                            if let Some(arg) =
+                                current_func.closure.get(&format!("__curried_arg{}", i))
                             {
-                                args.push(first_arg.clone());
-                            } else {
-                                let arg_count = current_func
-                                    .closure
-                                    .get("__curried_arg_count")
-                                    .and_then(|v| match v {
-                                        NixValue::Integer(n) => Some(n as usize),
-                                        _ => None,
-                                    })
-                                    .unwrap_or(0);
-                                for i in 1..=arg_count {
-                                    if let Some(arg) =
-                                        current_func.closure.get(&format!("__curried_arg{}", i))
-                                    {
-                                        args.push(arg.clone());
-                                    }
-                                }
-                            }
-                            args.push(current_arg.clone());
-
-                            match builtin.call_with_evaluator(&args, evaluator) {
-                                Ok(result) => return Ok(result),
-                                Err(Error::UnsupportedExpression { reason })
-                                    if reason.contains("takes") && reason.contains("arguments") =>
-                                {
-                                    // Still needs more args - create another curried function
-                                    let file_id = evaluator.current_file_id();
-                                    let mut closure = VariableScope::new();
-                                    closure.insert(
-                                        format!("__builtin_{}", builtin_name),
-                                        NixValue::Builtin(builtin_name.to_string()),
-                                    );
-                                    for (i, arg) in args.iter().enumerate() {
-                                        closure
-                                            .insert(format!("__curried_arg{}", i + 1), arg.clone());
-                                    }
-                                    closure.insert(
-                                        "__curried_arg_count".to_string(),
-                                        NixValue::Integer(args.len() as i64),
-                                    );
-                                    let next_curried = Function::new_curried_builtin_internal(
-                                        Parameter::Simple(format!(
-                                            "__curried_{}_arg{}",
-                                            builtin_name,
-                                            args.len() + 1
-                                        )),
-                                        format!("__curried_builtin_call:{}", builtin_name),
-                                        closure,
-                                        file_id,
-                                    );
-                                    return Ok(NixValue::Function(Arc::new(next_curried)));
-                                }
-                                Err(e) => return Err(e),
+                                args.push(arg.clone());
                             }
                         }
+                    }
+                    args.push(current_arg.clone());
+
+                    match builtin.call_with_evaluator(&args, evaluator) {
+                        Ok(result) => return Ok(result),
+                        Err(Error::UnsupportedExpression { reason })
+                            if reason.contains("takes") && reason.contains("arguments") =>
+                        {
+                            // Still needs more args - create another curried function
+                            let file_id = evaluator.current_file_id();
+                            let mut closure = VariableScope::new();
+                            closure.insert(
+                                format!("__builtin_{}", builtin_name),
+                                NixValue::Builtin(builtin_name.to_string()),
+                            );
+                            for (i, arg) in args.iter().enumerate() {
+                                closure.insert(format!("__curried_arg{}", i + 1), arg.clone());
+                            }
+                            closure.insert(
+                                "__curried_arg_count".to_string(),
+                                NixValue::Integer(args.len() as i64),
+                            );
+                            let next_curried = Function::new_curried_builtin_internal(
+                                Parameter::Simple(format!(
+                                    "__curried_{}_arg{}",
+                                    builtin_name,
+                                    args.len() + 1
+                                )),
+                                format!("__curried_builtin_call:{}", builtin_name),
+                                closure,
+                                file_id,
+                            );
+                            return Ok(NixValue::Function(Arc::new(next_curried)));
+                        }
+                        Err(e) => return Err(e),
                     }
                 }
                 return Err(Error::UnsupportedExpression {

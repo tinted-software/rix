@@ -12,4 +12,5 @@ thiserror.workspace = true
 rix-parser.workspace = true
 rix-eval.workspace = true
 serde_json.workspace = true
+colored.workspace = true
 rootcause.workspace = true

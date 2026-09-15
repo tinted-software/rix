@@ -141,33 +141,33 @@ impl Drop for VariableScope {
                     }
                 }
                 ScopeLayer::Recursive(mutex) => {
-                    if let Ok(mutex) = Arc::try_unwrap(mutex) {
-                        if let Ok(mut map) = mutex.into_inner() {
-                            for (_, v) in map.drain() {
-                                to_drop.push(v);
-                            }
+                    if let Ok(mutex) = Arc::try_unwrap(mutex)
+                        && let Ok(mut map) = mutex.into_inner()
+                    {
+                        for (_, v) in map.drain() {
+                            to_drop.push(v);
                         }
                     }
                 }
             }
         }
         while let Some(v) = to_drop.pop() {
-            if let NixValue::Thunk(thunk) = v {
-                if let Ok(mut thunk_inner) = Arc::try_unwrap(thunk) {
-                    for layer in thunk_inner.closure.layers.drain(..) {
-                        match layer {
-                            ScopeLayer::Lexical(mut map) => {
+            if let NixValue::Thunk(thunk) = v
+                && let Ok(mut thunk_inner) = Arc::try_unwrap(thunk)
+            {
+                for layer in thunk_inner.closure.layers.drain(..) {
+                    match layer {
+                        ScopeLayer::Lexical(mut map) => {
+                            for (_, v) in map.drain() {
+                                to_drop.push(v);
+                            }
+                        }
+                        ScopeLayer::Recursive(mutex) => {
+                            if let Ok(mutex) = Arc::try_unwrap(mutex)
+                                && let Ok(mut map) = mutex.into_inner()
+                            {
                                 for (_, v) in map.drain() {
                                     to_drop.push(v);
-                                }
-                            }
-                            ScopeLayer::Recursive(mutex) => {
-                                if let Ok(mutex) = Arc::try_unwrap(mutex) {
-                                    if let Ok(mut map) = mutex.into_inner() {
-                                        for (_, v) in map.drain() {
-                                            to_drop.push(v);
-                                        }
-                                    }
                                 }
                             }
                         }

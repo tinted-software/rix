@@ -9,7 +9,6 @@ keywords = ["nix", "evaluator", "parser", "expression"]
 categories = ["parsing", "development-tools"]
 
 [dependencies]
-clap.workspace = true
 thiserror.workspace = true
 rowan.workspace = true
 serde.workspace = true
@@ -28,6 +27,7 @@ gix.workspace = true
 reqwest.workspace = true
 flate2.workspace = true
 tar.workspace = true
+colored.workspace = true
 rix-parser.workspace = true
 
 [dev-dependencies]

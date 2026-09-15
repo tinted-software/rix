@@ -178,6 +178,7 @@ impl Evaluator {
         self.register_builtin(Box::new(crate::builtins::GenericClosureBuiltin));
         self.register_builtin(Box::new(crate::builtins::DirOfBuiltin));
         self.register_builtin(Box::new(crate::builtins::FromTOMLBuiltin));
+        self.register_builtin(Box::new(crate::builtins::ImportCargoLockBuiltin));
         self.register_builtin(Box::new(crate::builtins::GetEnvBuiltin));
         self.register_builtin(Box::new(crate::builtins::HashFileBuiltin));
         self.register_builtin(Box::new(crate::builtins::FetchGitBuiltin));
@@ -875,9 +876,25 @@ impl Evaluator {
                 for name in self.builtins.keys() {
                     builtins_attrs.insert(name.clone(), NixValue::Builtin(name.clone()));
                 }
+                let current_sys = if cfg!(target_os = "macos") {
+                    if cfg!(target_arch = "aarch64") {
+                        "aarch64-darwin"
+                    } else {
+                        "x86_64-darwin"
+                    }
+                } else if cfg!(target_os = "linux") {
+                    if cfg!(target_arch = "aarch64") {
+                        "aarch64-linux"
+                    } else {
+                        "x86_64-linux"
+                    }
+                } else {
+                    "unknown-system"
+                };
+
                 builtins_attrs.insert(
                     "currentSystem".to_string(),
-                    NixValue::String("x86_64-linux".to_string()),
+                    NixValue::String(current_sys.to_string()),
                 );
                 builtins_attrs.insert(
                     "builtins".to_string(),

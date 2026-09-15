@@ -452,33 +452,32 @@ impl Evaluator {
         rhs: &NixValue,
         is_nested: bool,
     ) -> Result<bool> {
-        if let (NixValue::Thunk(a), NixValue::Thunk(b)) = (lhs, rhs) {
-            if std::sync::Arc::ptr_eq(a, b) {
-                return Ok(true);
-            }
+        if let (NixValue::Thunk(a), NixValue::Thunk(b)) = (lhs, rhs)
+            && std::sync::Arc::ptr_eq(a, b)
+        {
+            return Ok(true);
         }
 
-        if let (NixValue::DeferredLookup(a, _), NixValue::DeferredLookup(b, _)) = (lhs, rhs) {
-            if a == b {
-                return Ok(true);
-            }
+        if let (NixValue::DeferredLookup(a, _), NixValue::DeferredLookup(b, _)) = (lhs, rhs)
+            && a == b
+        {
+            return Ok(true);
         }
 
         let lhs_forced = lhs.clone().force(self)?;
         let rhs_forced = rhs.clone().force(self)?;
 
-        if let (NixValue::Thunk(a), NixValue::Thunk(b)) = (&lhs_forced, &rhs_forced) {
-            if std::sync::Arc::ptr_eq(a, b) {
-                return Ok(true);
-            }
+        if let (NixValue::Thunk(a), NixValue::Thunk(b)) = (&lhs_forced, &rhs_forced)
+            && std::sync::Arc::ptr_eq(a, b)
+        {
+            return Ok(true);
         }
 
         if let (NixValue::DeferredLookup(a, _), NixValue::DeferredLookup(b, _)) =
             (&lhs_forced, &rhs_forced)
+            && a == b
         {
-            if a == b {
-                return Ok(true);
-            }
+            return Ok(true);
         }
 
         match (&lhs_forced, &rhs_forced) {
@@ -517,12 +516,11 @@ impl Evaluator {
                 }
                 for (key, a_val) in a {
                     if let Some(b_val) = b.get(key) {
-                        if key == "builtins" {
-                            if matches!(a_val, NixValue::DeferredLookup(n, _) if n == "builtins")
-                                || matches!(b_val, NixValue::DeferredLookup(n, _) if n == "builtins")
-                            {
-                                continue;
-                            }
+                        if key == "builtins"
+                            && (matches!(a_val, NixValue::DeferredLookup(n, _) if n == "builtins")
+                                || matches!(b_val, NixValue::DeferredLookup(n, _) if n == "builtins"))
+                        {
+                            continue;
                         }
                         if !self.evaluate_equal_inner(a_val, b_val, true)? {
                             return Ok(false);

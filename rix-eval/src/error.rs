@@ -42,6 +42,12 @@ pub enum Error {
     #[error("cannot evaluate unsupported expression type: {reason}")]
     UnsupportedExpression { reason: String },
 
+    /// A builtin function failed at runtime (bad arguments, fetch failures,
+    /// hash mismatches, etc.). Unlike [`Error::UnsupportedExpression`], the
+    /// message is presented to the user verbatim without an internal prefix.
+    #[error("{reason}")]
+    EvaluationError { reason: String },
+
     /// Literal value could not be parsed or is unsupported
     #[error("cannot evaluate unsupported literal: {literal}")]
     UnsupportedLiteral { literal: String },

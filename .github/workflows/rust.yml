@@ -1,10 +1,14 @@
 name: Rust
 
 on:
-  merge_group:
+  push:
     branches: [ "canon" ]
   pull_request:
     branches: [ "canon" ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
