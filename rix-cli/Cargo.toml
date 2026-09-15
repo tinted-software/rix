@@ -7,7 +7,7 @@ repository.workspace = true
 keywords = ["nix", "cli"]
 
 [dependencies]
-clap.workspace = true
+usage.workspace = true
 thiserror.workspace = true
 rix-parser.workspace = true
 rix-eval.workspace = true

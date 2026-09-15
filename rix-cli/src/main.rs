@@ -1,98 +1,102 @@
-use clap::{Parser, Subcommand};
 use nix_eval::{BuildOptions, Builder, Evaluator, NixValue};
 use rootcause::{Report, report};
 use std::collections::HashMap;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use usage::{Cli, Subcommands};
 
 /// Pure Rust Nix expression evaluator and package manager
-#[derive(Parser, Debug, Clone)]
-#[command(name = "rix", author, version, about = "Nix-compatible package manager", long_about = None)]
+#[derive(Cli, Debug, Clone)]
+#[usage(
+    name = "rix",
+    bin = "rix",
+    version,
+    about = "Nix-compatible package manager"
+)]
 struct Cli {
-    #[command(subcommand)]
+    #[usage(subcommand)]
     command: Option<Commands>,
 
     /// File to evaluate or build
-    #[arg(short = 'f', long = "file", global = true)]
+    #[usage(short = 'f', long = "file", global)]
     file: Option<String>,
 
     /// Attribute path to select
-    #[arg(short = 'A', long = "attr", global = true)]
+    #[usage(short = 'A', long = "attr", global)]
     attr: Option<String>,
 
     /// Output symlink path (default: result)
-    #[arg(short = 'o', long = "out-link", global = true)]
+    #[usage(short = 'o', long = "out-link", global)]
     out_link: Option<String>,
 
     /// Nix expression to evaluate
-    #[arg(short = 'e', long = "expr", global = true)]
+    #[usage(short = 'e', long = "expr", global)]
     expression: Option<String>,
 
     /// Produce output in JSON format
-    #[arg(long, global = true)]
+    #[usage(long, global)]
     json: bool,
 
     /// Verbose output
-    #[arg(short = 'v', long = "verbose", global = true)]
+    #[usage(short = 'v', long = "verbose", global)]
     verbose: bool,
 
     /// Keep failed build temporary directory
-    #[arg(long = "keep-failed", global = true)]
+    #[usage(long = "keep-failed", global)]
     keep_failed: bool,
 
     /// Dry run (do not execute build commands)
-    #[arg(long = "dry-run", global = true)]
+    #[usage(long = "dry-run", global)]
     dry_run: bool,
 }
 
-#[derive(Subcommand, Debug, Clone)]
+#[derive(Subcommands, Debug, Clone)]
 enum Commands {
     /// Build a derivation from a Nix expression or file
     Build {
         /// File to build (default: default.nix)
-        #[arg(short = 'f', long = "file")]
+        #[usage(short = 'f', long = "file")]
         file: Option<String>,
 
         /// Attribute path to build
-        #[arg(short = 'A', long = "attr")]
+        #[usage(short = 'A', long = "attr")]
         attr: Option<String>,
 
         /// Output symlink path (default: result)
-        #[arg(short = 'o', long = "out-link")]
+        #[usage(short = 'o', long = "out-link")]
         out_link: Option<String>,
 
         /// Nix expression to evaluate and build
-        #[arg(short = 'e', long = "expr")]
+        #[usage(short = 'e', long = "expr")]
         expr: Option<String>,
     },
 
     /// Evaluate a Nix expression
     Eval {
         /// Nix expression to evaluate
-        #[arg(short = 'e', long = "expr")]
+        #[usage(short = 'e', long = "expr")]
         expr: Option<String>,
 
         /// File to evaluate
-        #[arg(short = 'f', long = "file")]
+        #[usage(short = 'f', long = "file")]
         file: Option<String>,
 
         /// Attribute path to select
-        #[arg(short = 'A', long = "attr")]
+        #[usage(short = 'A', long = "attr")]
         attr: Option<String>,
     },
 
     /// Show derivation plan (ATerm or JSON)
     ShowDerivation {
         /// File to evaluate (default: default.nix)
-        #[arg(short = 'f', long = "file")]
+        #[usage(short = 'f', long = "file")]
         file: Option<String>,
 
         /// Attribute path to show
-        #[arg(short = 'A', long = "attr")]
+        #[usage(short = 'A', long = "attr")]
         attr: Option<String>,
     },
 }
-
 fn main() -> Result<(), Report> {
     let cli = Cli::parse();
     let evaluator = Evaluator::new();
