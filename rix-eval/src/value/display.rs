@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 thread_local! {
     /// Recursion depth guard for Display to prevent stack overflow on recursive structures
-    static DISPLAY_DEPTH: Cell<usize> = Cell::new(0);
+    static DISPLAY_DEPTH: Cell<usize> = const { Cell::new(0) };
 }
 
 const MAX_DISPLAY_DEPTH: usize = 20;
@@ -44,7 +44,7 @@ fn format_nix_float(f: f64) -> String {
     // Nix/C sprintf("%.6g") format:
     // Uses scientific notation if exponent is < -4 or >= precision (6).
     // Otherwise uses standard decimal notation with up to 6 significant digits.
-    if abs >= 1e-4 && abs < 1e6 {
+    if (1e-4..1e6).contains(&abs) {
         // Find how many decimal digits needed for up to 6 significant digits
         let magnitude = f.abs().log10().floor() as i32;
         let decimals = (5 - magnitude).max(0) as usize;

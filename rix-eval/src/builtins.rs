@@ -1134,9 +1134,37 @@ impl Builtin for DerivationBuiltin {
                     outputs.insert("out".to_string(), String::new());
                 }
 
+                let mut input_drvs = Vec::new();
                 let mut result_attrs_original = HashMap::new();
                 for (key, value) in attrs.iter() {
                     let key = key.to_string();
+                    let forced_v = value.clone().force(evaluator)?;
+
+                    // Check if this attribute is a derivation or contains derivations
+                    match &forced_v {
+                        NixValue::AttributeSet(m) => {
+                            if let Some(t) = m.get("type")
+                                && let Ok(s) = t.clone().force(evaluator)?.as_string()
+                                && s == "derivation"
+                            {
+                                input_drvs.push(forced_v.clone());
+                            }
+                        }
+                        NixValue::List(l) => {
+                            for item in l {
+                                if let Ok(forced_item) = item.clone().force(evaluator)
+                                    && let NixValue::AttributeSet(m) = &forced_item
+                                    && let Some(t) = m.get("type")
+                                    && let Ok(s) = t.clone().force(evaluator)?.as_string()
+                                    && s == "derivation"
+                                {
+                                    input_drvs.push(forced_item.clone());
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+
                     if key != "name"
                         && key != "system"
                         && key != "builder"
@@ -1144,7 +1172,6 @@ impl Builtin for DerivationBuiltin {
                         && key != "outputs"
                     {
                         // All other attributes become environment variables
-                        let forced_v = value.clone().force(evaluator)?;
                         result_attrs_original.insert(key.clone(), forced_v.clone());
                         let env_value = match forced_v {
                             NixValue::String(s) => s,
@@ -1166,26 +1193,17 @@ impl Builtin for DerivationBuiltin {
                     outputs: HashMap::new(), // Will be populated after computing store path
                 };
 
-                // Compute store path and write .drv file
-                // Note: In a full implementation, we'd also need to:
-                // - Compute output paths based on the derivation hash
-                // - Handle input derivations and sources properly
-                // - Set up the $out environment variable
+                let store = crate::store::Store::new();
+                let output_names: Vec<String> = outputs.keys().cloned().collect();
+                let (drv_path, output_paths) =
+                    store.compute_derivation_paths(&name, &output_names, &env);
 
-                // Compute output paths (simplified - in reality these depend on the derivation hash)
-                // For now, we'll use placeholder paths that would be computed properly
-                // in a full implementation
-                for output_name in outputs.keys() {
-                    // In a real implementation, output paths would be computed as:
-                    // /nix/store/<hash>-<name>-<output-name>
-                    // For now, we'll leave them empty as they require proper store path computation
+                for (output_name, out_path) in &output_paths {
                     derivation
                         .outputs
-                        .insert(output_name.clone(), String::new());
+                        .insert(output_name.clone(), out_path.clone());
                 }
 
-                // In a real implementation, we'd compute the actual store path here.
-                // For now, we'll return an attribute set that looks like a derivation.
                 let mut result_attrs = HashMap::new();
 
                 // Copy all original values into the result set
@@ -1194,7 +1212,7 @@ impl Builtin for DerivationBuiltin {
                 }
 
                 // Add required derivation attributes
-                result_attrs.insert("name".to_string(), NixValue::String(name));
+                result_attrs.insert("name".to_string(), NixValue::String(name.clone()));
                 result_attrs.insert("system".to_string(), NixValue::String(system));
                 result_attrs.insert("builder".to_string(), NixValue::String(builder));
                 result_attrs.insert(
@@ -1206,15 +1224,19 @@ impl Builtin for DerivationBuiltin {
                     NixValue::String("derivation".to_string()),
                 );
 
-                // Add dummy drvPath and outPath (in a real system these would be computed)
-                result_attrs.insert(
-                    "drvPath".to_string(),
-                    NixValue::String("/nix/store/placeholder.drv".to_string()),
-                );
-                result_attrs.insert(
-                    "outPath".to_string(),
-                    NixValue::String("/nix/store/placeholder".to_string()),
-                );
+                result_attrs.insert("drvPath".to_string(), NixValue::String(drv_path.clone()));
+                result_attrs.insert("__inputs".to_string(), NixValue::List(input_drvs));
+
+                let default_out = output_paths
+                    .get("out")
+                    .cloned()
+                    .unwrap_or_else(|| drv_path.clone());
+
+                result_attrs.insert("outPath".to_string(), NixValue::String(default_out.clone()));
+
+                for (out_name, out_p) in output_paths {
+                    result_attrs.insert(out_name, NixValue::String(out_p));
+                }
 
                 Ok(NixValue::AttributeSet(result_attrs))
             }
@@ -4145,6 +4167,126 @@ impl FromTOMLBuiltin {
     }
 }
 
+/// ImportCargoLock builtin
+///
+/// Parses a `Cargo.lock` file and exposes a structured representation of its
+/// packages. Git dependencies are enriched with `git`, `rev` and
+/// `gitArchiveUrl` attributes so that vendoring build-support code can fetch
+/// and lay them out without hardcoding crate-specific logic.
+pub struct ImportCargoLockBuiltin;
+
+impl Builtin for ImportCargoLockBuiltin {
+    fn name(&self) -> &str {
+        "importCargoLock"
+    }
+
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
+        if args.len() != 1 {
+            return Err(Error::UnsupportedExpression {
+                reason: format!("importCargoLock takes 1 argument, got {}", args.len()),
+            });
+        }
+
+        let contents = match args[0].clone().force(evaluator)? {
+            NixValue::String(s) => s,
+            NixValue::Path(p) => std::fs::read_to_string(&p).map_err(Error::IoError)?,
+            NixValue::StorePath(p) => std::fs::read_to_string(&p).map_err(Error::IoError)?,
+            other => {
+                return Err(Error::UnsupportedExpression {
+                    reason: format!("importCargoLock expects a path or string, got {}", other),
+                });
+            }
+        };
+
+        let value: toml::Value =
+            toml::from_str(&contents).map_err(|e| Error::UnsupportedExpression {
+                reason: format!("importCargoLock: parse error: {}", e),
+            })?;
+
+        let packages = value
+            .get("package")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let mut out_packages = Vec::new();
+        for pkg in packages {
+            let mut attrs = HashMap::new();
+
+            let name = pkg
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let version = pkg
+                .get("version")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            attrs.insert("name".to_string(), NixValue::String(name.clone()));
+            attrs.insert("version".to_string(), NixValue::String(version.clone()));
+
+            if let Some(checksum) = pkg.get("checksum").and_then(|v| v.as_str()) {
+                attrs.insert(
+                    "checksum".to_string(),
+                    NixValue::String(checksum.to_string()),
+                );
+            }
+
+            if let Some(source) = pkg.get("source").and_then(|v| v.as_str()) {
+                attrs.insert("source".to_string(), NixValue::String(source.to_string()));
+
+                if let Some(rest) = source.strip_prefix("git+") {
+                    // `rest` looks like:
+                    //   https://host/owner/repo?rev=<sha>#<sha>
+                    let (before_fragment, fragment) = match rest.split_once('#') {
+                        Some((b, f)) => (b, Some(f)),
+                        None => (rest, None),
+                    };
+                    let (git_url, query) = match before_fragment.split_once('?') {
+                        Some((g, q)) => (g, Some(q)),
+                        None => (before_fragment, None),
+                    };
+
+                    let mut rev = fragment.map(|s| s.to_string());
+                    if rev.is_none()
+                        && let Some(q) = query
+                    {
+                        for pair in q.split('&') {
+                            if let Some((k, v)) = pair.split_once('=')
+                                && (k == "rev" || k == "tag" || k == "branch")
+                            {
+                                rev = Some(v.to_string());
+                                break;
+                            }
+                        }
+                    }
+
+                    attrs.insert("git".to_string(), NixValue::String(git_url.to_string()));
+                    let rev = rev.unwrap_or_else(|| "HEAD".to_string());
+                    attrs.insert("rev".to_string(), NixValue::String(rev.clone()));
+                    attrs.insert(
+                        "gitArchiveUrl".to_string(),
+                        NixValue::String(format!("{}/archive/{}.tar.gz", git_url, rev)),
+                    );
+                }
+            }
+
+            out_packages.push(NixValue::AttributeSet(attrs));
+        }
+
+        let mut result = HashMap::new();
+        result.insert("packages".to_string(), NixValue::List(out_packages));
+        Ok(NixValue::AttributeSet(result))
+    }
+
+    fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
+        Err(Error::UnsupportedExpression {
+            reason: "importCargoLock requires evaluator context".to_string(),
+        })
+    }
+}
+
 /// GetEnv builtin - returns the value of an environment variable
 pub struct GetEnvBuiltin;
 
@@ -4288,6 +4430,69 @@ fn get_rix_cache_dir(sub: &str) -> std::path::PathBuf {
     } else {
         std::env::temp_dir().join("rix-cache").join(sub)
     }
+}
+
+/// Build a blocking HTTP client used for all fetch operations.
+fn build_fetch_client() -> Result<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder()
+        .use_rustls_tls()
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .user_agent("rix/0.1.0 (Nix-compatible; OpenDarwin)")
+        .build()
+        .map_err(|e| Error::EvaluationError {
+            reason: format!("fetch: failed to build HTTP client: {}", e),
+        })
+}
+
+/// Stream an HTTP response body to `dest`, returning the SHA-256 hex digest.
+///
+/// Streaming avoids buffering very large tarballs (e.g. LLVM) fully in memory
+/// and produces a meaningful error if the connection is interrupted.
+fn download_to_file(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    dest: &std::path::Path,
+) -> Result<String> {
+    use sha2::{Digest, Sha256};
+
+    let mut resp = client.get(url).send().map_err(|e| Error::EvaluationError {
+        reason: format!("fetch: failed to download '{}': {}", url, e),
+    })?;
+
+    if !resp.status().is_success() {
+        return Err(Error::EvaluationError {
+            reason: format!("fetch: HTTP error {} downloading '{}'", resp.status(), url),
+        });
+    }
+
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(Error::IoError)?;
+    }
+
+    let mut tmp = dest.to_path_buf();
+    tmp.set_extension("part");
+
+    let mut file = std::fs::File::create(&tmp).map_err(Error::IoError)?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = std::io::Read::read(&mut resp, &mut buf).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            Error::EvaluationError {
+                reason: format!("fetch: failed to read response body from '{}': {}", url, e),
+            }
+        })?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        std::io::Write::write_all(&mut file, &buf[..n]).map_err(Error::IoError)?;
+    }
+    std::io::Write::flush(&mut file).map_err(Error::IoError)?;
+    drop(file);
+
+    std::fs::rename(&tmp, dest).map_err(Error::IoError)?;
+    Ok(hex::encode(hasher.finalize()))
 }
 
 fn clone_shallow_repo(
@@ -4526,37 +4731,22 @@ impl Builtin for FetchurlBuiltin {
 
         let target_file = file_cache.join(&hash_key);
         if !target_file.exists() {
-            let client = reqwest::blocking::Client::builder()
-                .use_rustls_tls()
-                .build()
-                .map_err(|e| Error::UnsupportedExpression {
-                    reason: format!("fetchurl: failed to build HTTP client: {}", e),
-                })?;
-            let resp = client
-                .get(&url)
-                .send()
-                .map_err(|e| Error::UnsupportedExpression {
-                    reason: format!("fetchurl: failed to download '{}': {}", url, e),
-                })?;
-            let bytes = resp.bytes().map_err(|e| Error::UnsupportedExpression {
-                reason: format!("fetchurl: failed to read response from '{}': {}", url, e),
-            })?;
+            let client = build_fetch_client()?;
+            let actual = download_to_file(&client, &url, &target_file)?;
 
             if let Some(expected) = &expected_sha256 {
-                use sha2::{Digest, Sha256};
-                let mut hasher = Sha256::new();
-                hasher.update(&bytes);
-                let actual = hex::encode(hasher.finalize());
                 if &actual != expected {
-                    return Err(Error::UnsupportedExpression {
+                    let _ = std::fs::remove_file(&target_file);
+                    return Err(Error::EvaluationError {
                         reason: format!(
-                            "fetchurl: sha256 mismatch for '{}': expected {}, got {}",
+                            "fetchurl: sha256 mismatch for '{}' (expected {}, actual {}) - if the upstream content changed, update the sha256 in the package definition to the actual hash",
                             url, expected, actual
                         ),
                     });
                 }
+            } else {
+                eprintln!("fetchurl: {} -> sha256: {}", url, actual);
             }
-            std::fs::write(&target_file, bytes).map_err(Error::IoError)?;
         }
 
         Ok(NixValue::Path(target_file))
@@ -4639,46 +4829,32 @@ impl Builtin for FetchTarballBuiltin {
 
         let target_dir = tarball_cache.join(&hash_key);
         if !target_dir.exists() {
-            let client = reqwest::blocking::Client::builder()
-                .use_rustls_tls()
-                .build()
-                .map_err(|e| Error::UnsupportedExpression {
-                    reason: format!("fetchTarball: failed to build HTTP client: {}", e),
-                })?;
-            let resp = client
-                .get(&url)
-                .send()
-                .map_err(|e| Error::UnsupportedExpression {
-                    reason: format!("fetchTarball: failed to download '{}': {}", url, e),
-                })?;
-            let bytes = resp.bytes().map_err(|e| Error::UnsupportedExpression {
-                reason: format!(
-                    "fetchTarball: failed to read response from '{}': {}",
-                    url, e
-                ),
-            })?;
+            let client = build_fetch_client()?;
+            let archive_file = tarball_cache.join(format!("{}.tar.gz", hash_key));
+            let actual = download_to_file(&client, &url, &archive_file)?;
 
             if let Some(expected) = &expected_sha256 {
-                use sha2::{Digest, Sha256};
-                let mut hasher = Sha256::new();
-                hasher.update(&bytes);
-                let actual = hex::encode(hasher.finalize());
                 if &actual != expected {
-                    return Err(Error::UnsupportedExpression {
+                    let _ = std::fs::remove_file(&archive_file);
+                    return Err(Error::EvaluationError {
                         reason: format!(
-                            "fetchTarball: sha256 mismatch for '{}': expected {}, got {}",
+                            "fetchTarball: sha256 mismatch for '{}' (expected {}, actual {}) - if the upstream content changed, update the sha256 in the package definition to the actual hash",
                             url, expected, actual
                         ),
                     });
                 }
+            } else {
+                eprintln!("fetchTarball: {} -> sha256: {}", url, actual);
             }
 
-            let tar_gz = flate2::read::GzDecoder::new(&bytes[..]);
+            let file = std::fs::File::open(&archive_file).map_err(Error::IoError)?;
+            let tar_gz = flate2::read::GzDecoder::new(file);
             let mut archive = tar::Archive::new(tar_gz);
-            let temp_dir = tarball_cache.join(format!("{}.tmp", &hash_key));
+            let temp_dir = tarball_cache.join(format!("{hash_key}.tmp"));
             let _ = std::fs::remove_dir_all(&temp_dir);
             std::fs::create_dir_all(&temp_dir).map_err(Error::IoError)?;
             archive.unpack(&temp_dir).map_err(Error::IoError)?;
+            let _ = std::fs::remove_file(&archive_file);
 
             // If the unpacked directory contains a single top-level directory, strip it
             let entries = std::fs::read_dir(&temp_dir)
