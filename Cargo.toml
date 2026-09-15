@@ -11,8 +11,7 @@ repository = "https://github.com/Sunrise-OS/rix"
 [workspace.dependencies]
 rix-parser = { path = "rix-parser" }
 rix-eval = { path = "rix-eval" }
-
-clap = { version = "4.6.7", features = ["derive"] }
+usage = { package = "usage-rs", version = "6.9.1" }
 thiserror = "2.0.20"
 rootcause = "0.13.0"
 rowan = "0.17.0"
