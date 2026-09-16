@@ -15,6 +15,7 @@ pub struct BuildOptions {
     pub keep_failed: bool,
     pub dry_run: bool,
     pub out_link: Option<PathBuf>,
+    pub sandbox: crate::sandbox::SandboxConfig,
 }
 
 impl Default for BuildOptions {
@@ -24,6 +25,7 @@ impl Default for BuildOptions {
             keep_failed: false,
             dry_run: false,
             out_link: Some(PathBuf::from("result")),
+            sandbox: crate::sandbox::SandboxConfig::default(),
         }
     }
 }
@@ -149,15 +151,24 @@ impl Builder {
                 NixValue::List(l) => {
                     let mut parts = Vec::new();
                     for item in l {
-                        parts.push(item.clone().force(evaluator)?.to_string());
+                        let forced_item = item.clone().force(evaluator)?;
+                        if let NixValue::AttributeSet(sub) = &forced_item {
+                            if let Some(out_p) = sub.get("outPath").or_else(|| sub.get("out")) {
+                                if let Ok(forced_out) = out_p.clone().force(evaluator) {
+                                    parts.push(forced_out.to_string());
+                                    continue;
+                                }
+                            }
+                        }
+                        parts.push(forced_item.to_string());
                     }
                     parts.join(" ")
                 }
                 NixValue::AttributeSet(sub) => {
-                    if let Some(out_p) = sub.get("outPath") {
+                    if let Some(out_p) = sub.get("outPath").or_else(|| sub.get("out")) {
                         out_p.clone().force(evaluator)?.to_string()
                     } else {
-                        forced_v.to_string()
+                        "".to_string()
                     }
                 }
                 _ => forced_v.to_string(),
@@ -277,7 +288,13 @@ impl Builder {
         }
 
         // Setup execution environment
-        let mut cmd_env = env.clone();
+        let mut cmd_env = HashMap::new();
+        for (k, v) in &env {
+            if k.starts_with("__") || k == "inputDrvs" || k == "meta" {
+                continue;
+            }
+            cmd_env.insert(k.clone(), v.clone());
+        }
         for (out_name, out_p) in &output_paths {
             cmd_env.insert(out_name.clone(), out_p.clone());
         }
@@ -288,29 +305,28 @@ impl Builder {
         cmd_env.insert("TEMP".to_string(), temp_dir.to_string_lossy().to_string());
         cmd_env.insert("TMP".to_string(), temp_dir.to_string_lossy().to_string());
         cmd_env.insert("HOME".to_string(), temp_dir.to_string_lossy().to_string());
+        let sandbox = options.sandbox.resolve();
 
-        // Set Darwin / macOS defaults
-        if cfg!(target_os = "macos") {
+        // Set Darwin / macOS defaults (only if not sandboxed or if SDK is explicitly configured)
+        if cfg!(target_os = "macos") && !sandbox.enabled {
             cmd_env.insert("MACOSX_DEPLOYMENT_TARGET".to_string(), "14.0".to_string());
             if let Ok(sdk) = get_macos_sdk_path() {
                 cmd_env.insert("SDKROOT".to_string(), sdk);
             }
         }
 
-        // Construct PATH with store bin directories and host toolchain
-        let mut path_entries = Vec::new();
+        // Collect store bin directories from outputs, env, and input derivations
+        let mut store_bins = Vec::new();
         for out_p in output_paths.values() {
-            path_entries.push(format!("{}/bin", out_p));
+            store_bins.push(format!("{}/bin", out_p));
         }
-        // Extract bin paths from env values that look like store paths
         for v in env.values() {
             for token in v.split_whitespace() {
                 if token.contains("/store/") {
-                    path_entries.push(format!("{}/bin", token));
+                    store_bins.push(format!("{}/bin", token));
                 }
             }
         }
-        // Extract bin paths from input derivations
         if let Some(inputs_val) = attrs.get("__inputs")
             && let Ok(NixValue::List(inputs)) = inputs_val.clone().force(evaluator)
         {
@@ -319,39 +335,116 @@ impl Builder {
                     && let Some(out_p) = m.get("outPath")
                     && let Ok(s) = out_p.clone().force(evaluator)?.as_string()
                 {
-                    path_entries.push(format!("{}/bin", s));
+                    store_bins.push(format!("{}/bin", s));
                 }
             }
         }
-        // Add host paths
-        path_entries.push("/usr/local/bin".to_string());
-        path_entries.push("/opt/homebrew/bin".to_string());
-        path_entries.push("/usr/bin".to_string());
-        path_entries.push("/bin".to_string());
-        path_entries.push("/usr/sbin".to_string());
-        path_entries.push("/sbin".to_string());
-        if let Ok(home) = std::env::var("HOME") {
-            path_entries.push(format!("{}/.cargo/bin", home));
-            path_entries.push(format!("{}/.local/bin", home));
-            path_entries.push(format!("{}/.gentoo/usr/bin", home));
-        }
-        if let Ok(existing_path) = std::env::var("PATH") {
-            path_entries.push(existing_path);
-        }
-        cmd_env.insert("PATH".to_string(), path_entries.join(":"));
 
-        // Build execution
-        let build_script = generate_build_script(&cmd_env, &builder, &args);
-        let script_path = temp_dir.join("builder.sh");
-        std::fs::write(&script_path, &build_script).map_err(Error::IoError)?;
+        let (script_path, mut cmd, sandbox_root) = if sandbox.enabled {
+            // Populate chroot root
+            let root = sandbox
+                .create_root(&temp_dir, &name)
+                .map_err(Error::IoError)?;
+            let inputs = crate::sandbox::collect_input_store_paths(
+                &env,
+                &self.store.store_dir,
+                &output_paths,
+            );
+            let pop = sandbox
+                .populate(&root, &self.store.store_dir, &inputs)
+                .map_err(Error::IoError)?;
+            for w in &pop.warnings {
+                if options.verbose {
+                    eprintln!("{} {}", "sandbox warning:".yellow(), w);
+                }
+            }
 
-        let mut cmd = Command::new("/bin/bash");
-        cmd.arg("-e").arg(&script_path);
-        cmd.current_dir(&temp_dir);
-        cmd.envs(&cmd_env);
+            // Remap PATH to the hermetic sandbox PATH (no host dirs)
+            cmd_env.insert("PATH".to_string(), sandbox.sandbox_path(&store_bins));
+            let cmd_env = crate::sandbox::rewrite_env_for_sandbox(&cmd_env, &pop.path_rewrites);
+
+            // Build script lives inside the chroot root
+            let build_script = generate_build_script(&cmd_env, &builder, &args);
+            let host_script_path = root.join("build/builder.sh");
+            std::fs::write(&host_script_path, &build_script).map_err(Error::IoError)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(
+                    &host_script_path,
+                    std::fs::Permissions::from_mode(0o755),
+                );
+            }
+
+            let mut c = Command::new("chroot");
+            c.arg(&root)
+                .arg("/bin/bash")
+                .arg("-e")
+                .arg("/build/builder.sh");
+            c.envs(&cmd_env);
+            (host_script_path, c, Some(root))
+        } else {
+            // Non-sandboxed legacy PATH construction (host tools permitted)
+            let mut path_entries = store_bins;
+            path_entries.push("/usr/local/bin".to_string());
+            path_entries.push("/opt/homebrew/bin".to_string());
+            path_entries.push("/usr/bin".to_string());
+            path_entries.push("/bin".to_string());
+            path_entries.push("/usr/sbin".to_string());
+            path_entries.push("/sbin".to_string());
+            if let Ok(home) = std::env::var("HOME") {
+                path_entries.push(format!("{}/.cargo/bin", home));
+                path_entries.push(format!("{}/.local/bin", home));
+                path_entries.push(format!("{}/.gentoo/usr/bin", home));
+            }
+            if let Ok(existing_path) = std::env::var("PATH") {
+                path_entries.push(existing_path);
+            }
+            cmd_env.insert("PATH".to_string(), path_entries.join(":"));
+
+            let build_script = generate_build_script(&cmd_env, &builder, &args);
+            let script_path = temp_dir.join("builder.sh");
+            std::fs::write(&script_path, &build_script).map_err(Error::IoError)?;
+
+            let mut c = Command::new("/bin/bash");
+            c.arg("-e").arg(&script_path);
+            c.current_dir(&temp_dir);
+            c.envs(&cmd_env);
+            (script_path, c, None)
+        };
+        let _ = script_path;
 
         let output = cmd.output().map_err(Error::IoError)?;
 
+        // If sandboxed and execution succeeded, copy outputs back to real store
+        if output.status.success() {
+            if let Some(root) = &sandbox_root {
+                for p in output_paths.values() {
+                    let target = Path::new(p);
+                    let rel = target.strip_prefix("/").unwrap_or(target);
+                    let in_sandbox = root.join(rel);
+                    if in_sandbox.exists() {
+                        let _ = std::fs::remove_dir_all(target);
+                        if let Some(parent) = target.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        if let Err(e) = std::fs::rename(&in_sandbox, target) {
+                            // Rename fails across mountpoints; fall back to recursive copy
+                            if let Err(copy_err) = copy_tree(&in_sandbox, target) {
+                                eprintln!(
+                                    "{} Failed to copy sandbox output {} -> {}: {} (rename: {})",
+                                    "Error:".red().bold(),
+                                    in_sandbox.display(),
+                                    target.display(),
+                                    copy_err,
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if !output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -488,7 +581,7 @@ elif [ -n "$src" ]; then
             cp "$src" .
         fi
         # Only enter single subdirectory if configure/Makefile/etc is NOT in current directory
-        if [ ! -f "configure" ] && [ ! -f "configure.py" ] && [ ! -f "Makefile" ] && [ ! -f "makefile" ] && [ ! -f "CMakeLists.txt" ] && [ ! -f "Cargo.toml" ]; then
+        if [ ! -f "configure" ] && [ ! -f "configure.py" ] && [ ! -f "Makefile" ] && [ ! -f "makefile" ] && [ ! -f "CMakeLists.txt" ] && [ ! -f "Cargo.toml" ] && [ ! -f "install.sh" ]; then
             shopt -s nullglob
             subdirs=(*/)
             if [ ${#subdirs[@]} -eq 1 ] && [ -d "${subdirs[0]}" ]; then
@@ -597,4 +690,26 @@ fn compute_dir_size_str(path: &Path) -> String {
     } else {
         format!("{} bytes", total_bytes)
     }
+}
+
+fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
+    if src.is_dir() {
+        std::fs::create_dir_all(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            copy_tree(&entry.path(), &dst.join(entry.file_name()))?;
+        }
+    } else if src.is_symlink() {
+        let target = std::fs::read_link(src)?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, dst)?;
+        #[cfg(not(unix))]
+        std::fs::copy(src, dst)?;
+    } else {
+        if let Some(p) = dst.parent() {
+            std::fs::create_dir_all(p)?;
+        }
+        std::fs::copy(src, dst)?;
+    }
+    Ok(())
 }

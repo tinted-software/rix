@@ -48,6 +48,14 @@ struct Cli {
     /// Dry run (do not execute build commands)
     #[usage(long = "dry-run", global)]
     dry_run: bool,
+
+    /// Run derivations inside a chroot sandbox (requires root)
+    #[usage(long = "sandbox", global)]
+    sandbox: bool,
+
+    /// Standalone bootstrap toolchain tarball (llvm 23.1.1 + mold-macho + bash + coreutils + xcbuild + curl + bsdtar)
+    #[usage(long = "bootstrap-tarball", global)]
+    bootstrap_tarball: Option<String>,
 }
 
 #[derive(Subcommands, Debug, Clone)]
@@ -263,6 +271,10 @@ fn run_build(
         out_link: out_link
             .map(PathBuf::from)
             .or_else(|| Some(PathBuf::from("result"))),
+        sandbox: nix_eval::SandboxConfig {
+            enabled: cli.sandbox,
+            bootstrap_tarball: cli.bootstrap_tarball.as_ref().map(PathBuf::from),
+        },
     };
 
     let result = builder
