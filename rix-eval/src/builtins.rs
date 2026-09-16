@@ -3942,6 +3942,54 @@ impl DeepSeqBuiltin {
         }
     }
 }
+/// Parallel builtin - evaluates first argument concurrently, returns second argument
+///
+/// Inspired by Determinate Nix `builtins.parallel e1 e2`.
+/// Evaluates `e1` in a background thread while evaluating and returning `e2`.
+pub struct ParallelBuiltin;
+
+impl Builtin for ParallelBuiltin {
+    fn name(&self) -> &str {
+        "parallel"
+    }
+
+    fn call_with_evaluator(&self, args: &[NixValue], evaluator: &Evaluator) -> Result<NixValue> {
+        if args.len() != 2 {
+            return Err(Error::UnsupportedExpression {
+                reason: format!("parallel takes 2 arguments, got {}", args.len()),
+            });
+        }
+        let e1 = args[0].clone();
+        let e2 = args[1].clone();
+
+        if evaluator.eval_cores() > 1 {
+            let first_result = std::sync::Mutex::new(None);
+            let result = evaluator.eval_pool.scope(|scope| -> Result<NixValue> {
+                let first_result_ref = &first_result;
+                scope.spawn(|_| {
+                    let result = DeepSeqBuiltin::deep_force_limited(e1, evaluator, 0);
+                    *first_result_ref.lock().unwrap() = Some(result);
+                });
+                // Force the second argument on this thread while the worker
+                // evaluates the first. The scope joins before returning.
+                e2.force(evaluator)
+            })?;
+            if let Some(first_result) = first_result.into_inner().unwrap() {
+                first_result?;
+            }
+            Ok(result)
+        } else {
+            DeepSeqBuiltin::deep_force_limited(e1, evaluator, 0)?;
+            Ok(e2.force(evaluator)?)
+        }
+    }
+
+    fn call(&self, _args: &[NixValue]) -> Result<NixValue> {
+        Err(Error::UnsupportedExpression {
+            reason: "parallel requires evaluator context".to_string(),
+        })
+    }
+}
 
 /// GenericClosure builtin - builds a set of attribute sets from a start set and an operator
 /// See https://nixos.org/manual/nix/stable/language/builtins.html#builtins-genericClosure

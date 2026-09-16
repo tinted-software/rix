@@ -36,11 +36,13 @@ struct Cli {
     /// Produce output in JSON format
     #[usage(long, global)]
     json: bool,
+    /// Number of evaluator worker threads (0 = all available CPUs)
+    #[usage(long = "eval-cores", global)]
+    eval_cores: Option<usize>,
 
     /// Verbose output
     #[usage(short = 'v', long = "verbose", global)]
     verbose: bool,
-
     /// Keep failed build temporary directory
     #[usage(long = "keep-failed", global)]
     keep_failed: bool,
@@ -107,7 +109,10 @@ enum Commands {
 }
 fn main() -> Result<(), Report> {
     let cli = Cli::parse();
-    let evaluator = Evaluator::new();
+    let mut evaluator = Evaluator::new();
+    if let Some(cores) = cli.eval_cores {
+        evaluator.set_eval_cores(cores);
+    }
 
     // Determine command: default to Build if -f or -A is provided at top-level or program name is nix-build
     let prog_name = std::env::var("RIX_PROG_NAME")

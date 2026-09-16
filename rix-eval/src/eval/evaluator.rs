@@ -5,6 +5,7 @@ use crate::error::{Error, Result};
 use crate::eval::context::{EvaluationContext, VariableScope};
 use crate::value::NixValue;
 use codespan::{FileId, Files};
+use parking_lot::RwLock;
 use rix_parser::SyntaxNode;
 use rix_parser::ast::{Expr, Root};
 use rix_parser::parser::parse;
@@ -13,9 +14,15 @@ use rowan::ast::AstNode;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 use std::sync::Arc;
 const MAX_RECURSION_DEPTH: usize = 2000;
+
+thread_local! {
+    /// Thread-local context stack for tracking evaluation context (file, scope)
+    static THREAD_CONTEXT_STACK: RefCell<Vec<EvaluationContext>> = const { RefCell::new(Vec::new()) };
+    /// Thread-local recursion depth to prevent stack overflows
+    static THREAD_RECURSION_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
 
 pub struct Evaluator {
     /// Map of builtin function names to their implementations
@@ -25,21 +32,19 @@ pub struct Evaluator {
     /// Cache of imported modules (path -> evaluated value)
     /// Uses interior mutability to allow caching during immutable evaluation
     #[allow(dead_code)]
-    pub(crate) import_cache: Rc<RefCell<HashMap<PathBuf, NixValue>>>,
+    pub(crate) import_cache: Arc<RwLock<HashMap<PathBuf, NixValue>>>,
     /// Search paths for resolving <nixpkgs> style imports
     pub(crate) search_paths: HashMap<String, PathBuf>,
     /// Source file map for tracking file contents and locations
     /// Uses interior mutability to allow updating during immutable evaluation
-    pub(crate) source_map: Rc<RefCell<Files<String>>>,
+    pub(crate) source_map: Arc<RwLock<Files<String>>>,
     /// Mapping from FileId to file path for quick lookup
     /// Uses interior mutability to allow updating during immutable evaluation
-    pub(crate) file_id_to_path: Rc<RefCell<HashMap<FileId, PathBuf>>>,
-    /// Context stack for tracking evaluation context (file, scope)
-    /// The top of the stack represents the current evaluation context
-    /// Uses interior mutability to allow updating during immutable evaluation
-    context_stack: Rc<RefCell<Vec<EvaluationContext>>>,
-    /// Current recursion depth to prevent stack overflows
-    recursion_depth: Cell<usize>,
+    pub(crate) file_id_to_path: Arc<RwLock<HashMap<FileId, PathBuf>>>,
+    /// Number of CPU cores allocated for parallel evaluation.
+    eval_cores: usize,
+    /// Dedicated pool prevents unrelated Rayon work and bounds evaluator tasks.
+    pub(crate) eval_pool: Arc<rayon::ThreadPool>,
 }
 
 impl Default for Evaluator {
@@ -53,14 +58,19 @@ impl Evaluator {
         let mut evaluator = Self {
             builtins: HashMap::new(),
             scope: VariableScope::new(),
-            import_cache: Rc::new(RefCell::new(HashMap::new())),
+            import_cache: Arc::new(RwLock::new(HashMap::new())),
             search_paths: HashMap::new(),
-            source_map: Rc::new(RefCell::new(Files::new())),
-            file_id_to_path: Rc::new(RefCell::new(HashMap::new())),
-            context_stack: Rc::new(RefCell::new(Vec::new())),
-            recursion_depth: Cell::new(0),
+            source_map: Arc::new(RwLock::new(Files::new())),
+            file_id_to_path: Arc::new(RwLock::new(HashMap::new())),
+            eval_cores: Self::detect_eval_cores(),
+            eval_pool: Arc::new(
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(Self::detect_eval_cores())
+                    .thread_name(|index| format!("rix-eval-{index}"))
+                    .build()
+                    .expect("valid evaluator thread pool"),
+            ),
         };
-
         // Register basic builtin functions
         evaluator.register_basic_builtins();
 
@@ -185,6 +195,7 @@ impl Evaluator {
         self.register_builtin(Box::new(crate::builtins::FetchurlBuiltin));
         self.register_builtin(Box::new(crate::builtins::FetchTarballBuiltin));
         self.register_builtin(Box::new(crate::builtins::FetchTreeBuiltin));
+        self.register_builtin(Box::new(crate::builtins::ParallelBuiltin));
     }
 
     /// Get a builtin function by name
@@ -250,21 +261,59 @@ impl Evaluator {
     pub fn register_builtin(&mut self, builtin: Box<dyn Builtin>) {
         self.builtins.insert(builtin.name().to_string(), builtin);
     }
+    /// Detect eval cores from environment variable RIX_EVAL_CORES or default to available CPUs.
+    fn detect_eval_cores() -> usize {
+        if let Ok(cores_str) = std::env::var("RIX_EVAL_CORES")
+            && let Ok(parsed) = cores_str.trim().parse::<usize>()
+            && parsed > 0
+        {
+            return parsed;
+        }
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+    }
+
+    /// Get configured number of evaluation cores.
+    pub fn eval_cores(&self) -> usize {
+        self.eval_cores
+    }
+
+    /// Set configured number of evaluation cores (0 = all available cores).
+    pub fn set_eval_cores(&mut self, cores: usize) {
+        let cores = if cores == 0 {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+        } else {
+            cores
+        };
+        self.eval_cores = cores;
+        self.eval_pool = Arc::new(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(cores)
+                .thread_name(|index| format!("rix-eval-{index}"))
+                .build()
+                .expect("valid evaluator thread pool"),
+        );
+    }
 
     pub(crate) fn increment_recursion_depth(&self) -> Result<()> {
-        let depth = self.recursion_depth.get();
+        let depth = THREAD_RECURSION_DEPTH.with(|d| d.get());
         if depth >= MAX_RECURSION_DEPTH {
             return Err(Error::RecursionLimitExceeded);
         }
-        self.recursion_depth.set(depth + 1);
+        THREAD_RECURSION_DEPTH.with(|d| d.set(depth + 1));
         Ok(())
     }
 
     pub(crate) fn decrement_recursion_depth(&self) {
-        let depth = self.recursion_depth.get();
-        if depth > 0 {
-            self.recursion_depth.set(depth - 1);
-        }
+        THREAD_RECURSION_DEPTH.with(|d| {
+            let depth = d.get();
+            if depth > 0 {
+                d.set(depth - 1);
+            }
+        });
     }
 
     /// Set the variable scope for name resolution
@@ -355,12 +404,9 @@ impl Evaluator {
     /// NIX_PATH format: "name1=path1:name2=path2:..."
     /// Example: "nixpkgs=/path/to/nixpkgs:other=/path/to/other"
     pub(crate) fn current_file_path(&self) -> Option<PathBuf> {
-        let context_stack = self.context_stack.borrow();
-        let file_id_to_path = self.file_id_to_path.borrow();
-        context_stack
-            .last()
-            .and_then(|ctx| ctx.file_id)
-            .and_then(|file_id| file_id_to_path.get(&file_id).cloned())
+        let file_id =
+            THREAD_CONTEXT_STACK.with(|stack| stack.borrow().last().and_then(|ctx| ctx.file_id))?;
+        self.file_id_to_path.read().get(&file_id).cloned()
     }
 
     /// Resolve a path relative to the current file being evaluated
@@ -378,20 +424,19 @@ impl Evaluator {
     }
 
     pub(crate) fn current_file_id(&self) -> Option<FileId> {
-        self.context_stack
-            .borrow()
-            .last()
-            .and_then(|ctx| ctx.file_id)
+        THREAD_CONTEXT_STACK.with(|stack| stack.borrow().last().and_then(|ctx| ctx.file_id))
     }
 
     pub(crate) fn push_context(&self, file_id: Option<FileId>, scope: VariableScope) {
-        self.context_stack
-            .borrow_mut()
-            .push(EvaluationContext { file_id, scope });
+        THREAD_CONTEXT_STACK.with(|stack| {
+            stack
+                .borrow_mut()
+                .push(EvaluationContext { file_id, scope });
+        });
     }
 
     pub(crate) fn pop_context(&self) -> Option<EvaluationContext> {
-        self.context_stack.borrow_mut().pop()
+        THREAD_CONTEXT_STACK.with(|stack| stack.borrow_mut().pop())
     }
 
     /// Resolve a flake reference to a file system path
@@ -538,7 +583,7 @@ impl Evaluator {
             .canonicalize()
             .unwrap_or_else(|_| actual_path.clone());
 
-        if let Some(cached) = self.import_cache.borrow().get(&canonical_path) {
+        if let Some(cached) = self.import_cache.read().get(&canonical_path) {
             return Ok(cached.clone());
         }
 
@@ -550,12 +595,12 @@ impl Evaluator {
 
         // Add file to source map and get file ID
         let file_id = {
-            let mut source_map = self.source_map.borrow_mut();
+            let mut source_map = self.source_map.write();
             let file_name = canonical_path.to_string_lossy().to_string();
             let file_id = source_map.add(file_name, code.clone());
             // Store the mapping from file_id to path
             {
-                let mut file_id_to_path = self.file_id_to_path.borrow_mut();
+                let mut file_id_to_path = self.file_id_to_path.write();
                 file_id_to_path.insert(file_id, canonical_path.clone());
             }
             file_id
@@ -591,7 +636,7 @@ impl Evaluator {
         // Fully force the result
         let evaluated = result.deep_force(self)?;
         self.import_cache
-            .borrow_mut()
+            .write()
             .insert(canonical_path, evaluated.clone());
         Ok(evaluated)
     }
@@ -1100,24 +1145,55 @@ impl crate::value::NixValue {
         evaluator.increment_recursion_depth()?;
         let result = match value {
             NixValue::List(list) => {
-                let mut forced_list = Vec::new();
-                for item in list {
-                    forced_list.push(item.deep_force(evaluator)?);
-                }
-                Ok(NixValue::List(forced_list))
-            }
-            NixValue::AttributeSet(mut attrs) => {
-                let mut forced_attrs = HashMap::new();
-                for (key, value) in attrs.drain() {
-                    if key == "builtins"
-                        && matches!(value, NixValue::DeferredLookup(ref name, _) if name == "builtins")
-                    {
-                        forced_attrs.insert(key, value);
-                    } else {
-                        forced_attrs.insert(key, value.deep_force(evaluator)?);
+                if evaluator.eval_cores() > 1 && list.len() >= 32 {
+                    use rayon::prelude::*;
+                    let forced_results: Result<Vec<NixValue>> = evaluator.eval_pool.install(|| {
+                        list.into_par_iter()
+                            .map(|item| item.deep_force(evaluator))
+                            .collect()
+                    });
+                    Ok(NixValue::List(forced_results?))
+                } else {
+                    let mut forced_list = Vec::with_capacity(list.len());
+                    for item in list {
+                        forced_list.push(item.deep_force(evaluator)?);
                     }
+                    Ok(NixValue::List(forced_list))
                 }
-                Ok(NixValue::AttributeSet(forced_attrs))
+            }
+            NixValue::AttributeSet(attrs) => {
+                if evaluator.eval_cores() > 1 && attrs.len() >= 32 {
+                    let attrs_vec: Vec<(String, NixValue)> = attrs.into_iter().collect();
+                    let forced_pairs: Result<Vec<(String, NixValue)>> = evaluator.eval_pool.install(|| {
+                        use rayon::prelude::*;
+                        attrs_vec
+                            .into_par_iter()
+                            .map(|(key, val)| {
+                                if key == "builtins"
+                                    && matches!(&val, NixValue::DeferredLookup(name, _) if name == "builtins")
+                                {
+                                    Ok((key, val))
+                                } else {
+                                    Ok((key, val.deep_force(evaluator)?))
+                                }
+                            })
+                            .collect()
+                    });
+                    let forced_attrs = forced_pairs?.into_iter().collect();
+                    Ok(NixValue::AttributeSet(forced_attrs))
+                } else {
+                    let mut forced_attrs = HashMap::with_capacity(attrs.len());
+                    for (key, value) in attrs {
+                        if key == "builtins"
+                            && matches!(&value, NixValue::DeferredLookup(name, _) if name == "builtins")
+                        {
+                            forced_attrs.insert(key, value);
+                        } else {
+                            forced_attrs.insert(key, value.deep_force(evaluator)?);
+                        }
+                    }
+                    Ok(NixValue::AttributeSet(forced_attrs))
+                }
             }
             NixValue::Thunk(_)
             | NixValue::DeferredLookup(_, _)

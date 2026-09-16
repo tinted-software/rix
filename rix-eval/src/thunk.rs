@@ -6,19 +6,36 @@
 
 use crate::{Error, Evaluator, NixValue, Result, VariableScope};
 use codespan::FileId;
+use parking_lot::{Condvar, Mutex};
 use rix_parser::SyntaxNode;
 use rix_parser::ast::{Expr, Root};
 use rix_parser::parser::parse;
 use rix_parser::tokenizer::tokenize;
 use rowan::ast::AstNode;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::thread::ThreadId;
 
-/// Represents the state of a thunk during evaluation
+/// Internal representation of a thunk's evaluation state
+#[derive(Debug, Clone)]
+enum InternalThunkState {
+    /// Thunk has not been evaluated yet
+    Suspended,
+    /// Thunk is currently being evaluated by the thread with the given ThreadId
+    Pending(ThreadId),
+    /// Thunk is being evaluated by another thread and other threads are awaiting completion
+    Awaited(ThreadId),
+    /// Thunk has been successfully evaluated
+    Evaluated,
+    /// Thunk evaluation failed with an error
+    Failed(Error),
+}
+
+/// Represents the public state of a thunk
 #[derive(Debug, Clone, PartialEq)]
 pub enum ThunkState {
     /// Thunk has not been evaluated yet
     Suspended,
-    /// Thunk is currently being evaluated (blackhole marker for infinite recursion detection)
+    /// Thunk is currently being evaluated (by any thread)
     Evaluating,
     /// Thunk has been evaluated and the result is cached
     Evaluated,
@@ -54,7 +71,9 @@ pub struct Thunk {
     /// what file it was created in so that relative imports work correctly.
     file_id: Option<FileId>,
     /// The current state of the thunk
-    state: Arc<Mutex<ThunkState>>,
+    state: Arc<Mutex<InternalThunkState>>,
+    /// Condvar for threads waiting on thunk evaluation
+    condvar: Arc<Condvar>,
     /// Cached result after evaluation (None if not yet evaluated)
     cached_value: Arc<Mutex<Option<NixValue>>>,
 }
@@ -81,7 +100,8 @@ impl Thunk {
             expression_text,
             closure,
             file_id,
-            state: Arc::new(Mutex::new(ThunkState::Suspended)),
+            state: Arc::new(Mutex::new(InternalThunkState::Suspended)),
+            condvar: Arc::new(Condvar::new()),
             cached_value: Arc::new(Mutex::new(None)),
         }
     }
@@ -96,7 +116,8 @@ impl Thunk {
             expression_text,
             closure,
             file_id,
-            state: Arc::new(Mutex::new(ThunkState::Suspended)),
+            state: Arc::new(Mutex::new(InternalThunkState::Suspended)),
+            condvar: Arc::new(Condvar::new()),
             cached_value: Arc::new(Mutex::new(None)),
         }
     }
@@ -116,7 +137,13 @@ impl Thunk {
 
     /// Get the current state of the thunk
     pub fn state(&self) -> ThunkState {
-        self.state.lock().unwrap().clone()
+        match *self.state.lock() {
+            InternalThunkState::Suspended => ThunkState::Suspended,
+            InternalThunkState::Pending(_) | InternalThunkState::Awaited(_) => {
+                ThunkState::Evaluating
+            }
+            InternalThunkState::Evaluated | InternalThunkState::Failed(_) => ThunkState::Evaluated,
+        }
     }
 
     /// Check if the thunk is suspended (not yet evaluated)
@@ -162,105 +189,100 @@ impl Thunk {
     /// // let value = thunk.force(&evaluator)?;
     /// ```
     pub fn force(&self, evaluator: &Evaluator) -> Result<NixValue> {
-        // Check current state
-        let mut state_guard = self.state.lock().unwrap();
+        let current_thread = std::thread::current().id();
+        let mut state_guard = self.state.lock();
 
-        match *state_guard {
-            ThunkState::Evaluated => {
-                // Already evaluated - return cached value (memoization)
-                // This is the fast path: if the thunk has been evaluated before,
-                // we return the cached result without re-evaluating.
-                drop(state_guard);
-                let value_guard = self.cached_value.lock().unwrap();
-                value_guard
-                    .clone()
-                    .ok_or_else(|| Error::UnsupportedExpression {
-                        reason: "thunk marked as evaluated but no cached value found".to_string(),
-                    })
-            }
-            ThunkState::Evaluating => {
-                // Blackhole detected - infinite recursion
-                // This occurs when a thunk tries to evaluate itself while already
-                // being evaluated. The Evaluating state acts as a "blackhole" marker
-                // that prevents stack overflow by detecting this condition early.
-                drop(state_guard);
-                Err(Error::InfiniteRecursion)
-            }
-            ThunkState::Suspended => {
-                // Set blackhole marker before evaluation
-                // This prevents infinite recursion: if this thunk tries to evaluate
-                // itself (directly or indirectly) while we're evaluating it, we'll
-                // detect the Evaluating state and return an error instead of
-                // causing a stack overflow.
-                *state_guard = ThunkState::Evaluating;
-                drop(state_guard);
-
-                // Parse the expression text back into an AST node
-                let tokens = tokenize(&self.expression_text);
-                let (green_node, errors) = parse(tokens.into_iter());
-
-                if !errors.is_empty() {
-                    let error_msgs: Vec<String> =
-                        errors.iter().map(|e| format!("{:?}", e)).collect();
-                    // Reset state on error
-                    *self.state.lock().unwrap() = ThunkState::Suspended;
-                    return Err(Error::ParseError {
-                        reason: error_msgs.join(", "),
-                    });
+        loop {
+            match &*state_guard {
+                InternalThunkState::Evaluated => {
+                    drop(state_guard);
+                    let value_guard = self.cached_value.lock();
+                    return value_guard
+                        .clone()
+                        .ok_or_else(|| Error::UnsupportedExpression {
+                            reason: "thunk marked as evaluated but no cached value found"
+                                .to_string(),
+                        });
                 }
-
-                let syntax_node = SyntaxNode::new_root(green_node);
-                let root = Root::cast(syntax_node).ok_or_else(|| {
-                    // Reset state on error
-                    *self.state.lock().unwrap() = ThunkState::Suspended;
-                    Error::AstConversionError
-                })?;
-
-                let expr = root.expr().ok_or_else(|| {
-                    // Reset state on error
-                    *self.state.lock().unwrap() = ThunkState::Suspended;
-                    Error::NoExpression
-                })?;
-
-                // Restore the file_id context when forcing the thunk
-                // This is critical for relative imports within thunks to work correctly
-                // Push context with the thunk's file_id and closure
-                evaluator.push_context(self.file_id, self.closure.clone());
-
-                // Evaluate the expression using the thunk's closure as the scope
-                // Note: For let bindings, if a variable is not found or is Null in the closure,
-                // the identifier lookup in evaluate_expr_with_scope_impl will check the context stack
-                let result = evaluator.evaluate_expr_with_scope(&expr, &self.closure);
-
-                // Pop context (restore previous context)
-                evaluator.pop_context();
-
-                // Update state and cache result (memoization)
-                // Once evaluated, the result is cached so subsequent calls to force()
-                // will return the cached value without re-evaluation.
-                match result {
-                    Ok(value) => {
-                        // If the result is itself a thunk, force it recursively.
-                        // This detects infinite recursion (blackhole) when a thunk
-                        // evaluates to itself.
-                        let final_value = if let NixValue::Thunk(inner) = &value {
-                            inner.force(evaluator)?
-                        } else {
-                            value
-                        };
-                        let mut state_guard = self.state.lock().unwrap();
-                        let mut value_guard = self.cached_value.lock().unwrap();
-                        *state_guard = ThunkState::Evaluated;
-                        *value_guard = Some(final_value.clone());
-                        Ok(final_value)
+                InternalThunkState::Failed(err) => {
+                    return Err(err.clone());
+                }
+                InternalThunkState::Pending(owner) | InternalThunkState::Awaited(owner) => {
+                    if *owner == current_thread {
+                        // Same thread re-entered the thunk: infinite recursion (blackhole)
+                        drop(state_guard);
+                        return Err(Error::InfiniteRecursion);
                     }
-                    Err(e) => {
-                        // Reset state on error so the thunk can be retried
-                        *self.state.lock().unwrap() = ThunkState::Suspended;
-                        Err(e)
+                    // Different thread is evaluating: mark as Awaited and wait on Condvar
+                    *state_guard = InternalThunkState::Awaited(*owner);
+                    self.condvar.wait(&mut state_guard);
+                    // Loop again to check if Evaluated or Failed
+                }
+                InternalThunkState::Suspended => {
+                    // Mark as Pending with current thread as owner
+                    *state_guard = InternalThunkState::Pending(current_thread);
+                    drop(state_guard);
+
+                    // Evaluate the thunk expression
+                    let eval_res = self.evaluate_internal(evaluator);
+
+                    let mut state_guard = self.state.lock();
+                    let was_awaited = matches!(*state_guard, InternalThunkState::Awaited(_));
+
+                    match eval_res {
+                        Ok(final_value) => {
+                            *self.cached_value.lock() = Some(final_value.clone());
+                            *state_guard = InternalThunkState::Evaluated;
+                            if was_awaited {
+                                self.condvar.notify_all();
+                            }
+                            return Ok(final_value);
+                        }
+                        Err(err) => {
+                            *state_guard = InternalThunkState::Failed(err.clone());
+                            if was_awaited {
+                                self.condvar.notify_all();
+                            }
+                            return Err(err);
+                        }
                     }
                 }
             }
+        }
+    }
+
+    fn evaluate_internal(&self, evaluator: &Evaluator) -> Result<NixValue> {
+        // Parse the expression text back into an AST node
+        let tokens = tokenize(&self.expression_text);
+        let (green_node, errors) = parse(tokens.into_iter());
+
+        if !errors.is_empty() {
+            let error_msgs: Vec<String> = errors.iter().map(|e| format!("{:?}", e)).collect();
+            return Err(Error::ParseError {
+                reason: error_msgs.join(", "),
+            });
+        }
+
+        let syntax_node = SyntaxNode::new_root(green_node);
+        let root = Root::cast(syntax_node).ok_or(Error::AstConversionError)?;
+        let expr = root.expr().ok_or(Error::NoExpression)?;
+
+        // Restore the file_id context when forcing the thunk
+        evaluator.push_context(self.file_id, self.closure.clone());
+
+        // Evaluate the expression using the thunk's closure as the scope
+        let result = evaluator.evaluate_expr_with_scope(&expr, &self.closure);
+
+        // Pop context (restore previous context)
+        evaluator.pop_context();
+
+        let value = result?;
+        // If the result is itself a thunk, force it recursively.
+        // This detects infinite recursion (blackhole) when a thunk evaluates to itself.
+        if let NixValue::Thunk(inner) = &value {
+            inner.force(evaluator)
+        } else {
+            Ok(value)
         }
     }
 }

@@ -320,3 +320,34 @@ fn test_unknown_variable_error() {
         _ => panic!("Expected UnsupportedExpression for unknown variable"),
     }
 }
+
+#[test]
+fn test_parallel_returns_second_value() {
+    let mut evaluator = Evaluator::new();
+    evaluator.set_eval_cores(2);
+    assert_eq!(
+        evaluator.evaluate("builtins.parallel 1 42").unwrap(),
+        NixValue::Integer(42)
+    );
+}
+
+#[test]
+fn test_parallel_propagates_first_argument_errors() {
+    let mut evaluator = Evaluator::new();
+    evaluator.set_eval_cores(2);
+    assert!(
+        evaluator
+            .evaluate(r#"builtins.parallel (throw "boom") 42"#)
+            .is_err()
+    );
+}
+
+#[test]
+fn test_large_deep_force_preserves_collection() {
+    let mut evaluator = Evaluator::new();
+    evaluator.set_eval_cores(2);
+    let value = evaluator
+        .evaluate("[ 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 ]")
+        .unwrap();
+    assert!(matches!(value, NixValue::List(items) if items.len() == 32));
+}

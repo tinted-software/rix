@@ -85,7 +85,7 @@ impl Evaluator {
 
         // Check cache first
         {
-            let cache = self.import_cache.borrow();
+            let cache = self.import_cache.read();
             if let Some(cached_value) = cache.get(&normalized_path) {
                 return Ok(cached_value.clone());
             }
@@ -124,12 +124,12 @@ impl Evaluator {
 
         // Add file to source map and get file ID (move file_contents here)
         let file_id = {
-            let mut source_map = self.source_map.borrow_mut();
+            let mut source_map = self.source_map.write();
             let file_name = normalized_path.to_string_lossy().to_string();
             let file_id = source_map.add(file_name, file_contents);
             // Store the mapping from file_id to path
             {
-                let mut file_id_to_path = self.file_id_to_path.borrow_mut();
+                let mut file_id_to_path = self.file_id_to_path.write();
                 file_id_to_path.insert(file_id, normalized_path.clone());
             }
             file_id
@@ -150,7 +150,7 @@ impl Evaluator {
 
         // Cache the result
         {
-            let mut cache = self.import_cache.borrow_mut();
+            let mut cache = self.import_cache.write();
             cache.insert(normalized_path, result.clone());
         }
 

@@ -65,8 +65,36 @@ pub enum Error {
     RecursionLimitExceeded,
 
     /// IO error occurred during file operations
+    /// IO error occurred during file operations
     #[error("io error: {0}")]
     IoError(#[from] std::io::Error),
+}
+
+impl Clone for Error {
+    fn clone(&self) -> Self {
+        match self {
+            Error::ParseError { reason } => Error::ParseError {
+                reason: reason.clone(),
+            },
+            Error::AstConversionError => Error::AstConversionError,
+            Error::NoExpression => Error::NoExpression,
+            Error::UnsupportedExpression { reason } => Error::UnsupportedExpression {
+                reason: reason.clone(),
+            },
+            Error::EvaluationError { reason } => Error::EvaluationError {
+                reason: reason.clone(),
+            },
+            Error::UnsupportedLiteral { literal } => Error::UnsupportedLiteral {
+                literal: literal.clone(),
+            },
+            Error::InfiniteRecursion => Error::InfiniteRecursion,
+            Error::RecursionLimitExceeded => Error::RecursionLimitExceeded,
+            Error::IoError(e) => {
+                // Recreate std::io::Error with kind and message
+                Error::IoError(std::io::Error::new(e.kind(), e.to_string()))
+            }
+        }
+    }
 }
 
 /// Result type alias for the library

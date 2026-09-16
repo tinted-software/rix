@@ -85,6 +85,27 @@ fn bench_variable_resolution(c: &mut Criterion) {
     });
 }
 
+fn bench_large_parallel_collections(c: &mut Criterion) {
+    let evaluator = Evaluator::new();
+    let list = format!(
+        "[ {} ]",
+        (1..=128)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    c.bench_function("evaluate_large_list", |b| {
+        b.iter(|| evaluator.evaluate(black_box(&list)))
+    });
+}
+
+fn bench_parallel_builtin(c: &mut Criterion) {
+    let evaluator = Evaluator::new();
+    c.bench_function("parallel_builtin", |b| {
+        b.iter(|| evaluator.evaluate(black_box("builtins.parallel [1 2 3] 42")))
+    });
+}
+
 criterion_group!(
     benches,
     bench_evaluate_integer,
@@ -94,6 +115,8 @@ criterion_group!(
     bench_evaluate_attribute_set,
     bench_evaluate_nested_attribute_set,
     bench_evaluate_complex_expression,
-    bench_variable_resolution
+    bench_variable_resolution,
+    bench_large_parallel_collections,
+    bench_parallel_builtin
 );
 criterion_main!(benches);
