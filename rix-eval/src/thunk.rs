@@ -295,19 +295,36 @@ impl Thunk {
                 // will return the cached value without re-evaluation.
                 match result {
                     Ok(value) => {
-                        // If the result is itself a thunk, force it recursively.
-                        // This detects infinite recursion (blackhole) when a thunk
-                        // evaluates to itself.
-                        let final_value = if let NixValue::Thunk(inner) = &value {
-                            inner.force(evaluator)?
+                        // Cache this indirection before forcing it.  The target may refer
+                        // back to this thunk through a recursive scope; leaving this
+                        // thunk blackholed until after the target is forced turns such
+                        // valid aliases into false infinite-recursion errors.
+                        if let NixValue::Thunk(inner) = &value {
+                            {
+                                let mut state_guard = self.state.lock().unwrap();
+                                let mut value_guard = self.cached_value.lock().unwrap();
+                                *state_guard = ThunkState::Evaluated;
+                                *value_guard = Some(value.clone());
+                            }
+
+                            match inner.force(evaluator) {
+                                Ok(final_value) => {
+                                    *self.cached_value.lock().unwrap() = Some(final_value.clone());
+                                    Ok(final_value)
+                                }
+                                Err(error) => {
+                                    *self.state.lock().unwrap() = ThunkState::Suspended;
+                                    *self.cached_value.lock().unwrap() = None;
+                                    Err(error)
+                                }
+                            }
                         } else {
-                            value
-                        };
-                        let mut state_guard = self.state.lock().unwrap();
-                        let mut value_guard = self.cached_value.lock().unwrap();
-                        *state_guard = ThunkState::Evaluated;
-                        *value_guard = Some(final_value.clone());
-                        Ok(final_value)
+                            let mut state_guard = self.state.lock().unwrap();
+                            let mut value_guard = self.cached_value.lock().unwrap();
+                            *state_guard = ThunkState::Evaluated;
+                            *value_guard = Some(value.clone());
+                            Ok(value)
+                        }
                     }
                     Err(e) => {
                         // Reset state on error so the thunk can be retried
