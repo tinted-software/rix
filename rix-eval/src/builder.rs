@@ -1,6 +1,7 @@
 //! Derivation build execution engine for Rix
 
 use crate::error::{Error, Result};
+use crate::platform::{self, ExecutionStrategy, Platform};
 use crate::store::Store;
 use crate::value::NixValue;
 use colored::Colorize;
@@ -15,6 +16,12 @@ pub struct BuildOptions {
     pub keep_failed: bool,
     pub dry_run: bool,
     pub out_link: Option<PathBuf>,
+    /// Platform performing the build; defaults to the running machine.
+    pub build_platform: Option<String>,
+    /// Platform the outputs run on; defaults to `build_platform`.
+    pub host_platform: Option<String>,
+    /// Command used to execute host-platform binaries during a cross build.
+    pub runner: Option<String>,
 }
 
 impl Default for BuildOptions {
@@ -24,6 +31,9 @@ impl Default for BuildOptions {
             keep_failed: false,
             dry_run: false,
             out_link: Some(PathBuf::from("result")),
+            build_platform: None,
+            host_platform: None,
+            runner: None,
         }
     }
 }
@@ -95,6 +105,49 @@ impl Builder {
             None => "unknown".to_string(),
         };
 
+        // Resolve build/host platforms for cross compilation.  A derivation's
+        // `system` attribute names the machine its output runs on, i.e. the host
+        // platform; the build platform defaults to the machine running rix.
+        let host_platform = options
+            .host_platform
+            .as_deref()
+            .and_then(Platform::parse)
+            .or_else(|| Platform::parse(&system))
+            .unwrap_or_else(Platform::current);
+        let build_platform = options
+            .build_platform
+            .as_deref()
+            .and_then(Platform::parse)
+            .unwrap_or_else(Platform::current);
+        let execution = platform::execution_strategy(
+            &build_platform,
+            &host_platform,
+            options.runner.as_deref(),
+        );
+        let is_cross = !host_platform.is_native_to(&build_platform);
+
+        if is_cross {
+            println!(
+                "{} cross build {} -> {}",
+                "==>".cyan().bold(),
+                build_platform,
+                host_platform
+            );
+            match &execution {
+                ExecutionStrategy::Runner { command } => {
+                    println!("    host binaries will run via runner: {}", command.cyan())
+                }
+                ExecutionStrategy::Emulated { emulator } => println!(
+                    "    host binaries will run via emulator: {}",
+                    emulator.cyan()
+                ),
+                ExecutionStrategy::Unsupported { reason } => {
+                    println!("    {} {}", "warning:".yellow().bold(), reason)
+                }
+                ExecutionStrategy::Native => {}
+            }
+        }
+
         let builder = match attrs.get("builder") {
             Some(v) => v.clone().force(evaluator)?.to_string(),
             None => "/bin/sh".to_string(),
@@ -149,17 +202,12 @@ impl Builder {
                 NixValue::List(l) => {
                     let mut parts = Vec::new();
                     for item in l {
-                        parts.push(item.clone().force(evaluator)?.to_string());
+                        let forced = item.clone().force(evaluator)?;
+                        parts.push(env_string(evaluator, &forced)?);
                     }
                     parts.join(" ")
                 }
-                NixValue::AttributeSet(sub) => {
-                    if let Some(out_p) = sub.get("outPath") {
-                        out_p.clone().force(evaluator)?.to_string()
-                    } else {
-                        forced_v.to_string()
-                    }
-                }
+                NixValue::AttributeSet(_) => env_string(evaluator, &forced_v)?,
                 _ => forced_v.to_string(),
             };
             env.insert(key, str_val);
@@ -282,7 +330,9 @@ impl Builder {
             cmd_env.insert(out_name.clone(), out_p.clone());
         }
         cmd_env.insert("name".to_string(), name.clone());
-        cmd_env.insert("system".to_string(), system.clone());
+        // `$system` in Nix names the platform the derivation's outputs run on,
+        // i.e. the host platform (equal to the build platform for native builds).
+        cmd_env.insert("system".to_string(), host_platform.triple());
         cmd_env.insert("NIX_BUILD_CORES".to_string(), num_cpus().to_string());
         cmd_env.insert("TMPDIR".to_string(), temp_dir.to_string_lossy().to_string());
         cmd_env.insert("TEMP".to_string(), temp_dir.to_string_lossy().to_string());
@@ -295,6 +345,41 @@ impl Builder {
             if let Ok(sdk) = get_macos_sdk_path() {
                 cmd_env.insert("SDKROOT".to_string(), sdk);
             }
+        }
+
+        // Cross-compilation: expose platform identity to build scripts and, when
+        // a runner is available, a `rix-run-host` helper for executing
+        // host-platform binaries.
+        cmd_env.insert("buildPlatform".to_string(), build_platform.triple());
+        cmd_env.insert("hostPlatform".to_string(), host_platform.triple());
+        cmd_env.insert("RIX_BUILD_PLATFORM".to_string(), build_platform.triple());
+        cmd_env.insert("RIX_HOST_PLATFORM".to_string(), host_platform.triple());
+
+        let host_bin_dir = temp_dir.join("host-bin");
+        let run_host = host_bin_dir.join("rix-run-host");
+        if let Some(prefix) = match &execution {
+            ExecutionStrategy::Runner { command } => Some(format!("exec {command} \"$@\"")),
+            ExecutionStrategy::Emulated { emulator } => Some(format!("exec {emulator} \"$@\"")),
+            ExecutionStrategy::Native => Some("exec \"$@\"".to_string()),
+            ExecutionStrategy::Unsupported { .. } => None,
+        } {
+            std::fs::create_dir_all(&host_bin_dir).map_err(Error::IoError)?;
+            std::fs::write(
+                &run_host,
+                format!(
+                    "#!/bin/sh\n# Execute a host-platform binary during a cross build.\n{prefix}\n"
+                ),
+            )
+            .map_err(Error::IoError)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&run_host, std::fs::Permissions::from_mode(0o755));
+            }
+            cmd_env.insert(
+                "RIX_TARGET_RUNNER".to_string(),
+                run_host.to_string_lossy().to_string(),
+            );
         }
 
         // Construct PATH with store bin directories and host toolchain
@@ -322,6 +407,9 @@ impl Builder {
                     path_entries.push(format!("{}/bin", s));
                 }
             }
+        }
+        if run_host.exists() {
+            path_entries.push(host_bin_dir.to_string_lossy().to_string());
         }
         // Add host paths
         path_entries.push("/usr/local/bin".to_string());
@@ -445,6 +533,31 @@ impl Builder {
         }
         Ok(())
     }
+}
+
+/// Render a value the way Nix renders it in a derivation environment.
+///
+/// Derivations are plain attribute sets carrying `outPath`, so they contribute
+/// their output store path rather than their whole attribute set.  Without
+/// this, `nativeBuildInputs = [ toolchain mold ]` stringifies every attribute
+/// of every input (recursively) and can exceed the kernel's per-argument
+/// limit (`E2BIG`).
+fn env_string(evaluator: &crate::eval::Evaluator, value: &NixValue) -> Result<String> {
+    if let NixValue::AttributeSet(sub) = value
+        && let Some(out_p) = sub.get("outPath")
+    {
+        // The output path is itself a string; render it *unquoted* so that a
+        // list of inputs becomes `path1 path2`, matching Nix (a quoted form
+        // breaks `for input in $nativeBuildInputs` in the builder).
+        let forced = out_p.clone().force(evaluator)?;
+        return Ok(match forced {
+            NixValue::String(s) => s,
+            NixValue::Path(p) => p.to_string_lossy().to_string(),
+            NixValue::StorePath(p) => p,
+            other => other.to_string(),
+        });
+    }
+    Ok(value.clone().to_string())
 }
 
 /// Generate default builder shell script covering standard phases

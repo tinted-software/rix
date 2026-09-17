@@ -14,6 +14,7 @@ rix-eval = { path = "rix-eval" }
 usage = { package = "usage-rs", version = "6.9.1" }
 thiserror = "2.0.20"
 rootcause = "0.13.0"
+annotate-snippets = "0.12.16"
 rowan = "0.17.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
@@ -35,6 +36,7 @@ reqwest = { version = "0.13", default-features = false, features = ["blocking", 
 flate2 = { version = "1.1.10", features = ["zlib-rs"], default-features = false }
 tar = "0.4"
 colored = "2.2"
+parking_lot = "0.12"
 
 [profile.dev.package."*"]
 opt-level = 3

@@ -1,5 +1,5 @@
 use nix_eval::{BuildOptions, Builder, Evaluator, NixValue};
-use rootcause::{Report, report};
+use rootcause::Report;
 use std::collections::HashMap;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -32,6 +32,18 @@ struct Cli {
     /// Nix expression to evaluate
     #[usage(short = 'e', long = "expr", global)]
     expression: Option<String>,
+
+    /// Build platform (for example x86_64-linux) exposed as builtins.currentSystem
+    #[usage(long, global)]
+    system: Option<String>,
+
+    /// Host platform to cross compile for (for example x86_64-darwin)
+    #[usage(long = "cross-system", global)]
+    cross_system: Option<String>,
+
+    /// Command used by packages to execute host-platform binaries during a cross build
+    #[usage(long, global)]
+    runner: Option<String>,
 
     /// Produce output in JSON format
     #[usage(long, global)]
@@ -99,8 +111,29 @@ enum Commands {
 }
 fn main() -> Result<(), Report> {
     let cli = Cli::parse();
+    // SAFETY: these run before any threads are spawned and before the evaluator
+    // reads its environment, so there is no concurrent access.
+    unsafe {
+        if let Some(system) = &cli.system {
+            std::env::set_var("RIX_SYSTEM", system);
+        }
+        if let Some(cross_system) = &cli.cross_system {
+            std::env::set_var("RIX_CROSS_SYSTEM", cross_system);
+        }
+        if let Some(runner) = &cli.runner {
+            std::env::set_var("RIX_TARGET_RUNNER", runner);
+        }
+    }
     let evaluator = Evaluator::new();
+    let result = run(&evaluator, &cli);
+    if let Err(e) = result {
+        eprintln!("{}", evaluator.render_error(&e));
+        std::process::exit(1);
+    }
+    Ok(())
+}
 
+fn run(evaluator: &Evaluator, cli: &Cli) -> nix_eval::Result<()> {
     // Determine command: default to Build if -f or -A is provided at top-level or program name is nix-build
     let prog_name = std::env::var("RIX_PROG_NAME")
         .ok()
@@ -121,50 +154,50 @@ fn main() -> Result<(), Report> {
             out_link,
             expr,
         }) => run_build(
-            &evaluator,
+            evaluator,
             file.or(cli.file.clone()),
             attr.or(cli.attr.clone()),
             out_link.or(cli.out_link.clone()),
             expr.or(cli.expression.clone()),
-            &cli,
+            cli,
         ),
         Some(Commands::Eval { expr, file, attr }) => run_eval(
-            &evaluator,
+            evaluator,
             file.or(cli.file.clone()),
             attr.or(cli.attr.clone()),
             expr.or(cli.expression.clone()),
-            &cli,
+            cli,
         ),
         Some(Commands::ShowDerivation { file, attr }) => run_show_derivation(
-            &evaluator,
+            evaluator,
             file.or(cli.file.clone()),
             attr.or(cli.attr.clone()),
-            &cli,
+            cli,
         ),
         None => {
             if is_nix_instantiate {
-                run_show_derivation(&evaluator, cli.file.clone(), cli.attr.clone(), &cli)
+                run_show_derivation(evaluator, cli.file.clone(), cli.attr.clone(), cli)
             } else if is_nix_build || cli.file.is_some() || cli.attr.is_some() {
                 run_build(
-                    &evaluator,
+                    evaluator,
                     cli.file.clone(),
                     cli.attr.clone(),
                     cli.out_link.clone(),
                     cli.expression.clone(),
-                    &cli,
+                    cli,
                 )
             } else if let Some(expr) = cli.expression.clone() {
-                run_eval(&evaluator, None, None, Some(expr), &cli)
+                run_eval(evaluator, None, None, Some(expr), cli)
             } else {
                 // If nothing specified and default.nix exists, build default.nix
                 if Path::new("default.nix").exists() {
                     run_build(
-                        &evaluator,
+                        evaluator,
                         Some("default.nix".to_string()),
                         None,
                         cli.out_link.clone(),
                         None,
-                        &cli,
+                        cli,
                     )
                 } else {
                     let mut buffer = String::new();
@@ -173,7 +206,7 @@ fn main() -> Result<(), Report> {
                         println!("Usage: rix [build|eval|show-derivation] [-f FILE] [-A ATTR]");
                         return Ok(());
                     }
-                    run_eval(&evaluator, None, None, Some(buffer), &cli)
+                    run_eval(evaluator, None, None, Some(buffer), cli)
                 }
             }
         }
@@ -185,21 +218,17 @@ fn resolve_expression(
     file: Option<String>,
     attr: Option<String>,
     expr: Option<String>,
-) -> Result<NixValue, Report> {
+) -> nix_eval::Result<NixValue> {
     let mut root_val = if let Some(path_str) = file {
-        evaluator
-            .evaluate_from_file(Path::new(&path_str))
-            .map_err(|e| report!("{}", e))?
+        evaluator.evaluate_from_file(Path::new(&path_str))?
     } else if let Some(expression_str) = expr {
-        evaluator
-            .evaluate(&expression_str)
-            .map_err(|e| report!("{}", e))?
+        evaluator.evaluate(&expression_str)?
     } else if Path::new("default.nix").exists() {
-        evaluator
-            .evaluate_from_file(Path::new("default.nix"))
-            .map_err(|e| report!("{}", e))?
+        evaluator.evaluate_from_file(Path::new("default.nix"))?
     } else {
-        return Err(report!("No expression or file provided to evaluate"));
+        return Err(nix_eval::Error::EvaluationError {
+            reason: "No expression or file provided to evaluate".to_string(),
+        });
     };
 
     // Auto-call function if root value is a function taking an attribute set
@@ -208,21 +237,24 @@ fn resolve_expression(
     // Select attribute path if requested
     if let Some(attr_path) = attr {
         for part in attr_path.split('.') {
-            root_val = root_val.force(evaluator).map_err(|e| report!("{}", e))?;
+            root_val = root_val.force(evaluator)?;
             match root_val {
                 NixValue::AttributeSet(map) => {
-                    let next = map
-                        .get(part)
-                        .cloned()
-                        .ok_or_else(|| report!("Attribute '{}' not found in package set", part))?;
+                    let next =
+                        map.get(part)
+                            .cloned()
+                            .ok_or_else(|| nix_eval::Error::EvaluationError {
+                                reason: format!("Attribute '{}' not found in package set", part),
+                            })?;
                     root_val = unwrap_function(evaluator, next)?;
                 }
                 other => {
-                    return Err(report!(
-                        "Cannot select attribute '{}' from non-attribute-set: {}",
-                        part,
-                        other
-                    ));
+                    return Err(nix_eval::Error::EvaluationError {
+                        reason: format!(
+                            "Cannot select attribute '{}' from non-attribute-set: {}",
+                            part, other
+                        ),
+                    });
                 }
             }
         }
@@ -231,15 +263,13 @@ fn resolve_expression(
     unwrap_function(evaluator, root_val)
 }
 
-fn unwrap_function(evaluator: &Evaluator, mut val: NixValue) -> Result<NixValue, Report> {
-    val = val.force(evaluator).map_err(|e| report!("{}", e))?;
+fn unwrap_function(evaluator: &Evaluator, mut val: NixValue) -> nix_eval::Result<NixValue> {
+    val = val.force(evaluator)?;
     while matches!(val, NixValue::Function(_)) {
         if let NixValue::Function(func) = val {
             let empty_set = NixValue::AttributeSet(HashMap::new());
-            val = func
-                .apply(evaluator, empty_set)
-                .map_err(|e| report!("{}", e))?;
-            val = val.force(evaluator).map_err(|e| report!("{}", e))?;
+            val = func.apply(evaluator, empty_set)?;
+            val = val.force(evaluator)?;
         }
     }
     Ok(val)
@@ -252,7 +282,7 @@ fn run_build(
     out_link: Option<String>,
     expr: Option<String>,
     cli: &Cli,
-) -> Result<(), Report> {
+) -> nix_eval::Result<()> {
     let value = resolve_expression(evaluator, file, attr, expr)?;
 
     let builder = Builder::new();
@@ -263,11 +293,12 @@ fn run_build(
         out_link: out_link
             .map(PathBuf::from)
             .or_else(|| Some(PathBuf::from("result"))),
+        build_platform: cli.system.clone(),
+        host_platform: cli.cross_system.clone(),
+        runner: cli.runner.clone(),
     };
 
-    let result = builder
-        .build(evaluator, &value, &options)
-        .map_err(|e| report!("{}", e))?;
+    let result = builder.build(evaluator, &value, &options)?;
 
     if cli.json {
         let json_map: HashMap<String, String> = result
@@ -275,7 +306,12 @@ fn run_build(
             .into_iter()
             .map(|(k, v)| (k, v.to_string_lossy().to_string()))
             .collect();
-        println!("{}", serde_json::to_string_pretty(&json_map)?);
+        let json_str = serde_json::to_string_pretty(&json_map).map_err(|e| {
+            nix_eval::Error::EvaluationError {
+                reason: e.to_string(),
+            }
+        })?;
+        println!("{}", json_str);
     }
 
     Ok(())
@@ -287,10 +323,14 @@ fn run_eval(
     attr: Option<String>,
     expr: Option<String>,
     cli: &Cli,
-) -> Result<(), Report> {
+) -> nix_eval::Result<()> {
     let value = resolve_expression(evaluator, file, attr, expr)?;
     if cli.json {
-        println!("{}", serde_json::to_string_pretty(&value)?);
+        let json_str =
+            serde_json::to_string_pretty(&value).map_err(|e| nix_eval::Error::EvaluationError {
+                reason: e.to_string(),
+            })?;
+        println!("{}", json_str);
     } else {
         println!("{}", value);
     }
@@ -302,14 +342,19 @@ fn run_show_derivation(
     file: Option<String>,
     attr: Option<String>,
     cli: &Cli,
-) -> Result<(), Report> {
+) -> nix_eval::Result<()> {
     let value = resolve_expression(evaluator, file, attr, None)?;
-    let forced = value.force(evaluator).map_err(|e| report!("{}", e))?;
+    let forced = value.force(evaluator)?;
 
     match forced {
         NixValue::AttributeSet(map) => {
             if cli.json {
-                println!("{}", serde_json::to_string_pretty(&map)?);
+                let json_str = serde_json::to_string_pretty(&map).map_err(|e| {
+                    nix_eval::Error::EvaluationError {
+                        reason: e.to_string(),
+                    }
+                })?;
+                println!("{}", json_str);
             } else {
                 println!("{}", NixValue::AttributeSet(map));
             }
