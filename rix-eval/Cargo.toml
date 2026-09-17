@@ -30,6 +30,7 @@ tar.workspace = true
 colored.workspace = true
 rix-parser.workspace = true
 annotate-snippets.workspace = true
+parking_lot.workspace = true
 
 [dev-dependencies]
 criterion = { workspace = true, features = ["html_reports"] }

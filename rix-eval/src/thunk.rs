@@ -6,13 +6,14 @@
 
 use crate::{Error, Evaluator, NixValue, Result, VariableScope};
 use codespan::FileId;
+use parking_lot::Mutex;
 use rix_parser::SyntaxNode;
 use rix_parser::ast::{Expr, Root};
 use rix_parser::parser::parse;
 use rix_parser::tokenizer::tokenize;
 use rowan::ast::AstNode;
 use std::cell::Cell;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 thread_local! {
     /// Offset applied to AST text ranges when creating thunks, so that thunks
@@ -156,7 +157,7 @@ impl Thunk {
 
     /// Get the current state of the thunk
     pub fn state(&self) -> ThunkState {
-        self.state.lock().unwrap().clone()
+        self.state.lock().clone()
     }
 
     /// Check if the thunk is suspended (not yet evaluated)
@@ -203,7 +204,7 @@ impl Thunk {
     /// ```
     pub fn force(&self, evaluator: &Evaluator) -> Result<NixValue> {
         // Check current state
-        let mut state_guard = self.state.lock().unwrap();
+        let mut state_guard = self.state.lock();
 
         match *state_guard {
             ThunkState::Evaluated => {
@@ -211,7 +212,7 @@ impl Thunk {
                 // This is the fast path: if the thunk has been evaluated before,
                 // we return the cached result without re-evaluating.
                 drop(state_guard);
-                let value_guard = self.cached_value.lock().unwrap();
+                let value_guard = self.cached_value.lock();
                 value_guard
                     .clone()
                     .ok_or_else(|| Error::UnsupportedExpression {
@@ -243,7 +244,7 @@ impl Thunk {
                     let error_msgs: Vec<String> =
                         errors.iter().map(|e| format!("{:?}", e)).collect();
                     // Reset state on error
-                    *self.state.lock().unwrap() = ThunkState::Suspended;
+                    *self.state.lock() = ThunkState::Suspended;
                     return Err(Error::ParseError {
                         reason: error_msgs.join(", "),
                     });
@@ -252,13 +253,13 @@ impl Thunk {
                 let syntax_node = SyntaxNode::new_root(green_node);
                 let root = Root::cast(syntax_node).ok_or_else(|| {
                     // Reset state on error
-                    *self.state.lock().unwrap() = ThunkState::Suspended;
+                    *self.state.lock() = ThunkState::Suspended;
                     Error::AstConversionError
                 })?;
 
                 let expr = root.expr().ok_or_else(|| {
                     // Reset state on error
-                    *self.state.lock().unwrap() = ThunkState::Suspended;
+                    *self.state.lock() = ThunkState::Suspended;
                     Error::NoExpression
                 })?;
 
@@ -294,46 +295,68 @@ impl Thunk {
                 // Once evaluated, the result is cached so subsequent calls to force()
                 // will return the cached value without re-evaluation.
                 match result {
-                    Ok(value) => {
-                        // Cache this indirection before forcing it.  The target may refer
-                        // back to this thunk through a recursive scope; leaving this
-                        // thunk blackholed until after the target is forced turns such
-                        // valid aliases into false infinite-recursion errors.
-                        if let NixValue::Thunk(inner) = &value {
-                            {
-                                let mut state_guard = self.state.lock().unwrap();
-                                let mut value_guard = self.cached_value.lock().unwrap();
-                                *state_guard = ThunkState::Evaluated;
-                                *value_guard = Some(value.clone());
-                            }
-
-                            match inner.force(evaluator) {
-                                Ok(final_value) => {
-                                    *self.cached_value.lock().unwrap() = Some(final_value.clone());
-                                    Ok(final_value)
-                                }
-                                Err(error) => {
-                                    *self.state.lock().unwrap() = ThunkState::Suspended;
-                                    *self.cached_value.lock().unwrap() = None;
-                                    Err(error)
-                                }
-                            }
-                        } else {
-                            let mut state_guard = self.state.lock().unwrap();
-                            let mut value_guard = self.cached_value.lock().unwrap();
-                            *state_guard = ThunkState::Evaluated;
-                            *value_guard = Some(value.clone());
-                            Ok(value)
-                        }
-                    }
+                    Ok(value) => self.cache_result(value, evaluator),
                     Err(e) => {
                         // Reset state on error so the thunk can be retried
-                        *self.state.lock().unwrap() = ThunkState::Suspended;
+                        *self.state.lock() = ThunkState::Suspended;
                         Err(e)
                     }
                 }
             }
         }
+    }
+
+    /// Cache a successfully evaluated value, resolving thunk indirections.
+    ///
+    /// An expression that evaluates to another thunk is an indirection to that
+    /// thunk's value. The target may reach back to this thunk through a shared
+    /// recursive scope (`let a = b; b = a; in a`), so the indirection is
+    /// published *before* the target is forced: leaving this thunk blackholed
+    /// until then would report a spurious infinite recursion for the re-entrant
+    /// lookup.
+    ///
+    /// Following an indirection must terminate, so a chain that hands this very
+    /// thunk back is genuine infinite recursion rather than a cacheable value.
+    fn cache_result(&self, value: NixValue, evaluator: &Evaluator) -> Result<NixValue> {
+        let NixValue::Thunk(inner) = &value else {
+            *self.state.lock() = ThunkState::Evaluated;
+            *self.cached_value.lock() = Some(value.clone());
+            return Ok(value);
+        };
+
+        {
+            let mut state_guard = self.state.lock();
+            let mut value_guard = self.cached_value.lock();
+            *state_guard = ThunkState::Evaluated;
+            *value_guard = Some(value.clone());
+        }
+
+        match inner.force(evaluator) {
+            Ok(final_value) => {
+                // `let x = x; in x` and `let x = y; y = x; in x` — every link
+                // aliases the next, so the chain unwinds back to the thunk that
+                // started it instead of producing a value.
+                if let NixValue::Thunk(target) = &final_value
+                    && Self::is_same_thunk(target, self)
+                {
+                    *self.state.lock() = ThunkState::Suspended;
+                    *self.cached_value.lock() = None;
+                    return Err(Error::InfiniteRecursion);
+                }
+                *self.cached_value.lock() = Some(final_value.clone());
+                Ok(final_value)
+            }
+            Err(error) => {
+                *self.state.lock() = ThunkState::Suspended;
+                *self.cached_value.lock() = None;
+                Err(error)
+            }
+        }
+    }
+
+    /// Whether `other` and `this` are the same thunk allocation.
+    fn is_same_thunk(other: &Arc<Thunk>, this: &Thunk) -> bool {
+        std::ptr::eq(Arc::as_ptr(other), this)
     }
 }
 
