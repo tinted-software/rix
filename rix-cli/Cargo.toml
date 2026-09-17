@@ -14,3 +14,4 @@ rix-eval.workspace = true
 serde_json.workspace = true
 colored.workspace = true
 rootcause.workspace = true
+annotate-snippets.workspace = true

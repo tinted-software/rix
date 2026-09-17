@@ -11,7 +11,25 @@ use rix_parser::ast::{Expr, Root};
 use rix_parser::parser::parse;
 use rix_parser::tokenizer::tokenize;
 use rowan::ast::AstNode;
+use std::cell::Cell;
 use std::sync::{Arc, Mutex};
+
+thread_local! {
+    /// Offset applied to AST text ranges when creating thunks, so that thunks
+    /// created while evaluating a re-parsed expression still report spans in
+    /// their original file coordinates. Maintained by [`Evaluator::set_span_base`].
+    static SPAN_BASE: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Set the thread-local span base, returning the previous value.
+pub(crate) fn set_thread_span_base(base: usize) -> usize {
+    SPAN_BASE.with(|c| c.replace(base))
+}
+
+/// Get the current thread-local span base.
+pub(crate) fn thread_span_base() -> usize {
+    SPAN_BASE.with(|c| c.get())
+}
 
 /// Represents the state of a thunk during evaluation
 #[derive(Debug, Clone, PartialEq)]
@@ -53,6 +71,12 @@ pub struct Thunk {
     /// This is critical for lazy evaluation: when a thunk is forced, it needs to know
     /// what file it was created in so that relative imports work correctly.
     file_id: Option<FileId>,
+    /// Absolute byte offset of the start of this thunk's expression within its source file.
+    /// Used to translate spans from the re-parsed expression text back into file
+    /// coordinates when reporting errors.
+    span_start: usize,
+    /// Absolute byte offset of the end of this thunk's expression within its source file.
+    span_end: usize,
     /// The current state of the thunk
     state: Arc<Mutex<ThunkState>>,
     /// Cached result after evaluation (None if not yet evaluated)
@@ -75,12 +99,18 @@ impl Thunk {
         // Store the expression as text representation for now
         // In a full implementation, we'd want to store the actual AST node
         // but that requires handling lifetimes carefully
+        let range = expr.syntax().text_range();
         let expression_text = expr.syntax().text().to_string();
+        let base = thread_span_base();
+        let start = base + usize::from(range.start());
+        let end = base + usize::from(range.end());
 
         Self {
             expression_text,
             closure,
             file_id,
+            span_start: start,
+            span_end: end,
             state: Arc::new(Mutex::new(ThunkState::Suspended)),
             cached_value: Arc::new(Mutex::new(None)),
         }
@@ -92,13 +122,23 @@ impl Thunk {
         closure: VariableScope,
         file_id: Option<FileId>,
     ) -> Self {
+        // Synthetic expressions have no source location of their own; retain the
+        // current span base so nested evaluation keeps correct file coordinates.
+        let base = thread_span_base();
         Self {
             expression_text,
             closure,
             file_id,
+            span_start: base,
+            span_end: base,
             state: Arc::new(Mutex::new(ThunkState::Suspended)),
             cached_value: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Absolute byte range of this thunk's expression within its source file
+    pub fn span(&self) -> (usize, usize) {
+        (self.span_start, self.span_end)
     }
 
     /// Get the expression text stored in this thunk
@@ -227,10 +267,25 @@ impl Thunk {
                 // Push context with the thunk's file_id and closure
                 evaluator.push_context(self.file_id, self.closure.clone());
 
+                // Translate spans produced while evaluating the re-parsed
+                // expression text back into file coordinates.
+                let prev_base = evaluator.span_base();
+                evaluator.set_span_base(self.span_start);
+
                 // Evaluate the expression using the thunk's closure as the scope
                 // Note: For let bindings, if a variable is not found or is Null in the closure,
                 // the identifier lookup in evaluate_expr_with_scope_impl will check the context stack
-                let result = evaluator.evaluate_expr_with_scope(&expr, &self.closure);
+                let result = evaluator
+                    .evaluate_expr_with_scope(&expr, &self.closure)
+                    .map_err(|error| {
+                        error.with_span(crate::error::Span::new(
+                            self.file_id,
+                            self.span_start,
+                            self.span_end,
+                        ))
+                    });
+
+                evaluator.set_span_base(prev_base);
 
                 // Pop context (restore previous context)
                 evaluator.pop_context();

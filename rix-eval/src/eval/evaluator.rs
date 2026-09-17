@@ -40,6 +40,11 @@ pub struct Evaluator {
     context_stack: Rc<RefCell<Vec<EvaluationContext>>>,
     /// Current recursion depth to prevent stack overflows
     recursion_depth: Cell<usize>,
+    /// Current expression span being evaluated (start, end byte offsets in current file)
+    current_expr_span: Cell<Option<(usize, usize)>>,
+    /// Offset added to AST text ranges to translate them into file coordinates.
+    /// Non-zero while evaluating a re-parsed thunk expression.
+    span_base: Cell<usize>,
 }
 
 impl Default for Evaluator {
@@ -59,6 +64,8 @@ impl Evaluator {
             file_id_to_path: Rc::new(RefCell::new(HashMap::new())),
             context_stack: Rc::new(RefCell::new(Vec::new())),
             recursion_depth: Cell::new(0),
+            current_expr_span: Cell::new(None),
+            span_base: Cell::new(0),
         };
 
         // Register basic builtin functions
@@ -384,6 +391,139 @@ impl Evaluator {
             .and_then(|ctx| ctx.file_id)
     }
 
+    /// Get the current source span (file_id, start, end) being evaluated, if any
+    pub fn current_span(&self) -> Option<crate::error::Span> {
+        let file_id = self.current_file_id();
+        let (start, end) = self.current_expr_span.get()?;
+        Some(crate::error::Span::new(file_id, start, end))
+    }
+
+    /// The current offset applied to AST text ranges to obtain file coordinates.
+    pub(crate) fn span_base(&self) -> usize {
+        self.span_base.get()
+    }
+
+    /// Set the offset applied to AST text ranges. Returns the previous value.
+    pub(crate) fn set_span_base(&self, base: usize) -> usize {
+        crate::thunk::set_thread_span_base(base);
+        self.span_base.replace(base)
+    }
+
+    /// Create a source span for an expression. Re-parsed thunk and function
+    /// bodies have ranges relative to their text fragment, so prefer locating a
+    /// uniquely occurring expression in the original file over arithmetic
+    /// offset translation.
+    pub(crate) fn span_for_expr(&self, expr: &Expr) -> crate::error::Span {
+        let range = expr.syntax().text_range();
+        let fallback = crate::error::Span::new(
+            self.current_file_id(),
+            self.span_base() + usize::from(range.start()),
+            self.span_base() + usize::from(range.end()),
+        );
+
+        let Some(file_id) = self.current_file_id() else {
+            return fallback;
+        };
+        let text = expr.syntax().text().to_string();
+        if text.is_empty() {
+            return fallback;
+        }
+        let source_map = self.source_map.borrow();
+        let source = source_map.source(file_id);
+        let mut matches = source.match_indices(&text);
+        let Some((start, _)) = matches.next() else {
+            return fallback;
+        };
+        if matches.next().is_some() {
+            return fallback;
+        }
+        crate::error::Span::new(Some(file_id), start, start + text.len())
+    }
+
+    /// Locate a function parameter pattern in its defining source file.
+    pub(crate) fn span_for_parameter(
+        &self,
+        file_id: Option<FileId>,
+        parameter: &crate::function::Parameter,
+        fallback: crate::error::Span,
+    ) -> crate::error::Span {
+        let Some(file_id) = file_id else {
+            return fallback;
+        };
+        let text = parameter.to_string();
+        let source_map = self.source_map.borrow();
+        let source = source_map.source(file_id);
+        let mut matches = source.match_indices(&text);
+        let Some((start, _)) = matches.next() else {
+            return fallback;
+        };
+        if matches.next().is_some() {
+            return fallback;
+        }
+        crate::error::Span::new(Some(file_id), start, start + text.len())
+    }
+
+    /// Access the internal Files source map
+    pub fn source_map(&self) -> std::cell::Ref<'_, Files<String>> {
+        self.source_map.borrow()
+    }
+
+    /// Render an evaluation error and its source-level evaluation stack.
+    pub fn render_error(&self, error: &Error) -> String {
+        let spans = error.spans();
+        if spans.is_empty() {
+            return error.to_string();
+        }
+
+        let source_map = self.source_map.borrow();
+        let renderer = annotate_snippets::Renderer::styled()
+            .decor_style(annotate_snippets::renderer::DecorStyle::Unicode);
+        let message = error.to_string();
+        let mut rendered = String::new();
+
+        for (index, span) in spans.iter().enumerate() {
+            let Some(file_id) = span.file_id else {
+                continue;
+            };
+            let source = source_map.source(file_id);
+            let path = source_map.name(file_id).to_string_lossy();
+            let start = span.start.min(source.len());
+            let end = span.end.max(start).min(source.len());
+            let range = if start == end {
+                if start < source.len() {
+                    start..start + 1
+                } else {
+                    start.saturating_sub(1)..start
+                }
+            } else {
+                start..end
+            };
+            let title = if index == 0 {
+                message.as_str()
+            } else {
+                "while evaluating this expression"
+            };
+            let level = if index == 0 {
+                annotate_snippets::Level::ERROR
+            } else {
+                annotate_snippets::Level::INFO
+            };
+            let report = &[level.primary_title(title).element(
+                annotate_snippets::Snippet::source(source.as_str())
+                    .line_start(1)
+                    .path(path.as_ref())
+                    .annotation(annotate_snippets::AnnotationKind::Primary.span(range)),
+            )];
+            rendered.push_str(&renderer.render(report));
+        }
+
+        if rendered.is_empty() {
+            message
+        } else {
+            rendered
+        }
+    }
+
     pub(crate) fn push_context(&self, file_id: Option<FileId>, scope: VariableScope) {
         self.context_stack
             .borrow_mut()
@@ -488,6 +628,11 @@ impl Evaluator {
     ///     _ => panic!("Expected attribute set"),
     /// }
     pub fn evaluate(&self, expr: &str) -> Result<NixValue> {
+        let file_id = {
+            let mut source_map = self.source_map.borrow_mut();
+            source_map.add("<expr>", expr.to_string())
+        };
+
         // Tokenize and parse the Nix expression
         let tokens = tokenize(expr);
         let (green_node, errors) = parse(tokens.into_iter());
@@ -504,10 +649,18 @@ impl Evaluator {
         let syntax_node = SyntaxNode::new_root(green_node);
         let root = Root::cast(syntax_node).ok_or(Error::AstConversionError)?;
 
-        let expr = root.expr().ok_or(Error::NoExpression)?;
+        let expr_ast = root.expr().ok_or(Error::NoExpression)?;
+
+        // Push context for this expression string
+        self.push_context(Some(file_id), self.scope.clone());
 
         // Evaluate the expression
-        let result = self.evaluate_expr(&expr)?;
+        let result = self.evaluate_expr(&expr_ast);
+
+        // Pop context
+        self.pop_context();
+
+        let result = result?;
 
         // Fully force the result so that we return a concrete value
         // instead of a thunk (lazy evaluation).
@@ -652,7 +805,16 @@ impl Evaluator {
         scope: &VariableScope,
     ) -> Result<NixValue> {
         self.increment_recursion_depth()?;
-        let result = self.evaluate_expr_with_scope_impl_inner(expr, scope);
+        let range = expr.syntax().text_range();
+        let base = self.span_base();
+        let prev_span = self.current_expr_span.replace(Some((
+            base + usize::from(range.start()),
+            base + usize::from(range.end()),
+        )));
+        let result = self
+            .evaluate_expr_with_scope_impl_inner(expr, scope)
+            .map_err(|error| error.with_span(self.span_for_expr(expr)));
+        self.current_expr_span.set(prev_span);
         self.decrement_recursion_depth();
         result
     }
@@ -666,7 +828,16 @@ impl Evaluator {
         scope: &VariableScope,
     ) -> Result<crate::function::TcoResult> {
         self.increment_recursion_depth()?;
-        let result = self.evaluate_expr_with_tco_inner(expr, scope);
+        let range = expr.syntax().text_range();
+        let base = self.span_base();
+        let prev_span = self.current_expr_span.replace(Some((
+            base + usize::from(range.start()),
+            base + usize::from(range.end()),
+        )));
+        let result = self
+            .evaluate_expr_with_tco_inner(expr, scope)
+            .map_err(|error| error.with_span(self.span_for_expr(expr)));
+        self.current_expr_span.set(prev_span);
         self.decrement_recursion_depth();
         result
     }
