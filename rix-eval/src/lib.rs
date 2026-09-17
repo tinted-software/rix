@@ -17,7 +17,7 @@ mod xml;
 // Re-export public API
 pub use builder::{BuildOptions, BuildResult, Builder};
 pub use builtin::Builtin;
-pub use error::{Error, Result};
+pub use error::{Error, Result, Span};
 pub use eval::{EvaluationContext, Evaluator, VariableScope};
 pub use function::Function;
 pub use store::Store;

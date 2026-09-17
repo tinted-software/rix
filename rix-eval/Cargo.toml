@@ -29,6 +29,7 @@ flate2.workspace = true
 tar.workspace = true
 colored.workspace = true
 rix-parser.workspace = true
+annotate-snippets.workspace = true
 
 [dev-dependencies]
 criterion = { workspace = true, features = ["html_reports"] }

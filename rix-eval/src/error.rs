@@ -2,7 +2,30 @@
 //!
 //! All errors follow the "cannot" prefix convention for user-facing messages.
 
+use codespan::FileId;
 use thiserror::Error;
+
+/// Source location span for an expression or error
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Span {
+    pub file_id: Option<FileId>,
+    pub start: usize,
+    pub end: usize,
+}
+
+impl Span {
+    pub fn new(file_id: Option<FileId>, start: usize, end: usize) -> Self {
+        Self {
+            file_id,
+            start,
+            end,
+        }
+    }
+
+    pub fn to_range(&self) -> std::ops::Range<usize> {
+        self.start..self.end
+    }
+}
 
 /// Error type for Nix evaluation
 ///
@@ -67,6 +90,42 @@ pub enum Error {
     /// IO error occurred during file operations
     #[error("io error: {0}")]
     IoError(#[from] std::io::Error),
+
+    /// Evaluation error with a source location.
+    #[error("{error}")]
+    SpannedError { error: Box<Error>, span: Span },
+}
+
+impl Error {
+    /// Attach an evaluation frame to this error.
+    pub fn with_span(self, span: Span) -> Self {
+        Self::SpannedError {
+            error: Box::new(self),
+            span,
+        }
+    }
+
+    /// Source spans from the innermost failure to its outer evaluation frames.
+    pub fn spans(&self) -> Vec<Span> {
+        let mut spans = Vec::new();
+        let mut error = self;
+        while let Self::SpannedError { error: inner, span } = error {
+            spans.push(*span);
+            error = inner;
+        }
+        spans.reverse();
+        spans
+    }
+
+    /// Return the innermost (most specific) source span associated with this error.
+    pub fn span(&self) -> Option<Span> {
+        self.spans().into_iter().next()
+    }
+
+    /// Render this error using annotate-snippets and the given evaluator
+    pub fn render_annotated(&self, evaluator: &crate::Evaluator) -> String {
+        evaluator.render_error(self)
+    }
 }
 
 /// Result type alias for the library
