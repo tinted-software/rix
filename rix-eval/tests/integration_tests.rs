@@ -314,9 +314,12 @@ fn test_unknown_variable_error() {
     let result = evaluator.evaluate("unknownVar");
     assert!(result.is_err());
     match result.unwrap_err() {
-        nix_eval::Error::UnsupportedExpression { reason } => {
-            assert!(reason.contains("unknown identifier"));
-        }
-        _ => panic!("Expected UnsupportedExpression for unknown variable"),
+        nix_eval::Error::SpannedError { error, .. } => match *error {
+            nix_eval::Error::UnsupportedExpression { reason } => {
+                assert!(reason.contains("unknown identifier"));
+            }
+            _ => panic!("Expected UnsupportedExpression for unknown variable"),
+        },
+        _ => panic!("Expected a spanned error for unknown variable"),
     }
 }

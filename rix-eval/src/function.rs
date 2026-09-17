@@ -109,6 +109,10 @@ pub struct Function {
     /// those thunks need to know what file the function was defined in so that relative
     /// imports work correctly.
     pub(crate) file_id: Option<FileId>,
+    /// Absolute byte range of the body expression in its defining source file.
+    /// Function bodies are re-parsed when applied, so this restores their source
+    /// coordinates for diagnostics.
+    body_span_start: usize,
 }
 
 impl Function {
@@ -129,17 +133,20 @@ impl Function {
         body_expr: &Expr,
         closure: VariableScope,
         file_id: Option<FileId>,
+        span_base: usize,
     ) -> Self {
         // Store the body expression as text representation for now
         // In a full implementation, we'd want to store the actual AST node
         // but that requires handling lifetimes carefully
         let body_text = body_expr.syntax().text().to_string();
+        let range = body_expr.syntax().text_range();
 
         Self {
             parameter,
             body_text,
             closure,
             file_id,
+            body_span_start: span_base + usize::from(range.start()),
         }
     }
 
@@ -150,11 +157,13 @@ impl Function {
         closure: VariableScope,
         file_id: Option<FileId>,
     ) -> Self {
+        let base = crate::thunk::thread_span_base();
         Self {
             parameter,
             body_text,
             closure,
             file_id,
+            body_span_start: base,
         }
     }
 
@@ -204,11 +213,13 @@ impl Function {
         );
         closure.insert("__curried_first_arg".to_string(), first_arg);
 
+        let base = crate::thunk::thread_span_base();
         Self {
             parameter,
             body_text,
             closure,
             file_id,
+            body_span_start: base,
         }
     }
 
@@ -248,7 +259,13 @@ impl Function {
         let root = Root::cast(syntax_node).unwrap();
         let dummy_expr = root.expr().unwrap();
 
-        Self::new(parameter, &dummy_expr, closure, file_id)
+        Self::new(
+            parameter,
+            &dummy_expr,
+            closure,
+            file_id,
+            crate::thunk::thread_span_base(),
+        )
     }
 
     /// Create a curried foldl' function (2 args applied, needs list)
@@ -276,11 +293,13 @@ impl Function {
         closure.insert("__foldl_op".to_string(), op);
         closure.insert("__foldl_nul".to_string(), nul);
 
+        let base = crate::thunk::thread_span_base();
         Self {
             parameter,
             body_text,
             closure,
             file_id,
+            body_span_start: base,
         }
     }
 
@@ -356,7 +375,16 @@ impl Function {
                                 "function expected argument '{}' but it was not provided",
                                 entry_name
                             ),
-                        });
+                        }
+                        .with_span(evaluator.span_for_parameter(
+                            self.file_id,
+                            &self.parameter,
+                            crate::error::Span::new(
+                                self.file_id,
+                                self.body_span_start,
+                                self.body_span_start,
+                            ),
+                        )));
                     }
                 }
 
@@ -757,12 +785,17 @@ impl Function {
 
             let body_expr = root.expr().ok_or(Error::NoExpression)?;
 
-            // Push context with the function's file_id
+            // Push context with the function's file_id. Function bodies are
+            // re-parsed from text, so translate their local AST ranges back to
+            // the defining source file before evaluating them.
             evaluator.push_context(current_file_id, current_scope.clone());
+            let prev_base = evaluator.span_base();
+            evaluator.set_span_base(current_func.body_span_start);
 
             // Evaluate the body expression with TCO support
             let result = evaluator.evaluate_expr_with_tco(&body_expr, &current_scope);
 
+            evaluator.set_span_base(prev_base);
             // Pop context
             evaluator.pop_context();
 

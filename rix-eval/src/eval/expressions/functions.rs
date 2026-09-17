@@ -56,7 +56,13 @@ impl Evaluator {
 
         // Create a function closure with the current scope
         let file_id = self.current_file_id();
-        let func = function::Function::new(parameter, &body_expr, scope.clone(), file_id);
+        let func = function::Function::new(
+            parameter,
+            &body_expr,
+            scope.clone(),
+            file_id,
+            self.span_base(),
+        );
 
         Ok(NixValue::Function(Arc::new(func)))
     }
