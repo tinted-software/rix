@@ -2638,6 +2638,7 @@ dependencies = [
  "gix",
  "hex",
  "md5",
+ "parking_lot",
  "proptest",
  "quick-xml",
  "regex",
