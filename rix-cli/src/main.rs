@@ -33,6 +33,18 @@ struct Cli {
     #[usage(short = 'e', long = "expr", global)]
     expression: Option<String>,
 
+    /// Build platform (for example x86_64-linux) exposed as builtins.currentSystem
+    #[usage(long, global)]
+    system: Option<String>,
+
+    /// Host platform to cross compile for (for example x86_64-darwin)
+    #[usage(long = "cross-system", global)]
+    cross_system: Option<String>,
+
+    /// Command used by packages to execute host-platform binaries during a cross build
+    #[usage(long, global)]
+    runner: Option<String>,
+
     /// Produce output in JSON format
     #[usage(long, global)]
     json: bool,
@@ -99,8 +111,20 @@ enum Commands {
 }
 fn main() -> Result<(), Report> {
     let cli = Cli::parse();
+    // SAFETY: these run before any threads are spawned and before the evaluator
+    // reads its environment, so there is no concurrent access.
+    unsafe {
+        if let Some(system) = &cli.system {
+            std::env::set_var("RIX_SYSTEM", system);
+        }
+        if let Some(cross_system) = &cli.cross_system {
+            std::env::set_var("RIX_CROSS_SYSTEM", cross_system);
+        }
+        if let Some(runner) = &cli.runner {
+            std::env::set_var("RIX_TARGET_RUNNER", runner);
+        }
+    }
     let evaluator = Evaluator::new();
-
     let result = run(&evaluator, &cli);
     if let Err(e) = result {
         eprintln!("{}", evaluator.render_error(&e));
@@ -269,6 +293,9 @@ fn run_build(
         out_link: out_link
             .map(PathBuf::from)
             .or_else(|| Some(PathBuf::from("result"))),
+        build_platform: cli.system.clone(),
+        host_platform: cli.cross_system.clone(),
+        runner: cli.runner.clone(),
     };
 
     let result = builder.build(evaluator, &value, &options)?;

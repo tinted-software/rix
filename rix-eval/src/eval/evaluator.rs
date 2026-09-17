@@ -1047,26 +1047,36 @@ impl Evaluator {
                 for name in self.builtins.keys() {
                     builtins_attrs.insert(name.clone(), NixValue::Builtin(name.clone()));
                 }
-                let current_sys = if cfg!(target_os = "macos") {
-                    if cfg!(target_arch = "aarch64") {
-                        "aarch64-darwin"
-                    } else {
-                        "x86_64-darwin"
-                    }
-                } else if cfg!(target_os = "linux") {
-                    if cfg!(target_arch = "aarch64") {
-                        "aarch64-linux"
-                    } else {
-                        "x86_64-linux"
-                    }
-                } else {
-                    "unknown-system"
-                };
+                // `--system` / RIX_SYSTEM overrides the platform exposed as
+                // currentSystem, which is what `import ./pkgs {}` keys off of.
+                let current_sys = std::env::var("RIX_SYSTEM")
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| crate::platform::Platform::current().triple());
+
+                // Cross-compilation metadata.  `RIX_CROSS_SYSTEM` names the host
+                // platform when it differs from the build platform.
+                let host_sys = std::env::var("RIX_CROSS_SYSTEM")
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| current_sys.clone());
+                let is_cross = host_sys != current_sys;
 
                 builtins_attrs.insert(
                     "currentSystem".to_string(),
-                    NixValue::String(current_sys.to_string()),
+                    NixValue::String(current_sys.clone()),
                 );
+                builtins_attrs.insert(
+                    "currentBuildPlatform".to_string(),
+                    NixValue::String(current_sys),
+                );
+                builtins_attrs.insert(
+                    "currentHostPlatform".to_string(),
+                    NixValue::String(host_sys),
+                );
+                builtins_attrs.insert("isCrossCompiling".to_string(), NixValue::Boolean(is_cross));
                 builtins_attrs.insert(
                     "builtins".to_string(),
                     NixValue::DeferredLookup(
