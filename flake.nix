@@ -36,9 +36,11 @@
         system:
         let
           pkgs = import nixpkgs { inherit system; };
+          moldStdenv = pkgs.stdenvAdapters.useMoldLinker pkgs.clangStdenv;
+          mkShell = pkgs.mkShell.override { stdenv = moldStdenv; };
         in
         {
-          default = pkgs.mkShell {
+          default = mkShell {
             name = "rix-devshell";
             packages = with pkgs; [
               rustc
