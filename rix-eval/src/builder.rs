@@ -22,6 +22,14 @@ pub struct BuildOptions {
     pub host_platform: Option<String>,
     /// Command used to execute host-platform binaries during a cross build.
     pub runner: Option<String>,
+    /// Enable P2P substitution when peers or trusted keys are configured.
+    pub p2p: bool,
+    /// Extra peer EndpointIds to query for P2P substitution.
+    pub peers: Vec<String>,
+    /// Extra trusted Ed25519 public keys for verifying P2P path manifests.
+    pub trusted_keys: Vec<String>,
+    /// Allow substituting unsigned/untrusted store paths from P2P peers.
+    pub allow_untrusted: bool,
 }
 
 impl Default for BuildOptions {
@@ -34,6 +42,10 @@ impl Default for BuildOptions {
             build_platform: None,
             host_platform: None,
             runner: None,
+            p2p: true,
+            peers: Vec::new(),
+            trusted_keys: Vec::new(),
+            allow_untrusted: false,
         }
     }
 }
@@ -63,6 +75,10 @@ impl Builder {
         Self {
             store: Store::new(),
         }
+    }
+
+    pub fn with_store(store: Store) -> Self {
+        Self { store }
     }
 
     /// Build a derivation value or attribute set
@@ -252,10 +268,12 @@ impl Builder {
             .cloned()
             .unwrap_or_else(|| drv_path.clone());
 
-        // Check if outputs already exist in store
-        let all_outputs_exist = output_paths
-            .values()
-            .all(|p| self.store.is_valid_path(Path::new(p)));
+        // Check if outputs already exist on disk or can be restored from local iroh-blobs store
+        let all_outputs_exist = output_paths.values().all(|p| {
+            let path = Path::new(p);
+            self.store.is_valid_path(path)
+                || matches!(self.store.ensure_materialized(path), Ok(true))
+        });
 
         if all_outputs_exist {
             if options.verbose {
@@ -278,6 +296,66 @@ impl Builder {
                     .collect(),
                 cached: true,
             });
+        }
+
+        // Attempt P2P substitution if enabled and discovery sources are configured
+        if !options.dry_run && options.p2p && self.store.config.p2p.enabled {
+            let output_vec: Vec<PathBuf> = output_paths.values().map(PathBuf::from).collect();
+            match self.store.substitution_config(
+                &options.peers,
+                &options.trusted_keys,
+                options.allow_untrusted,
+            ) {
+                Ok(sub_cfg) if sub_cfg.has_discovery_sources() => {
+                    match self.store.try_substitute(&output_vec, &sub_cfg) {
+                        Ok(true) => {
+                            println!(
+                                "   {} Substituted {} via P2P ({})",
+                                "✓".green(),
+                                name.bold(),
+                                out_path.cyan()
+                            );
+                            if let Some(link) = &options.out_link {
+                                create_symlink(Path::new(&out_path), link)?;
+                            }
+                            return Ok(BuildResult {
+                                drv_name: name,
+                                drv_path,
+                                outputs: output_paths
+                                    .into_iter()
+                                    .map(|(k, v)| (k, PathBuf::from(v)))
+                                    .collect(),
+                                cached: true,
+                            });
+                        }
+                        Ok(false) => {
+                            if options.verbose {
+                                println!("    P2P cache miss for {}, building locally", name);
+                            }
+                        }
+                        Err(e) => {
+                            if options.verbose {
+                                println!(
+                                    "    {} P2P substitution skipped for {}: {}",
+                                    "warning:".yellow().bold(),
+                                    name,
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    if options.verbose {
+                        println!(
+                            "    {} invalid P2P configuration: {}",
+                            "warning:".yellow().bold(),
+                            e
+                        );
+                    }
+                }
+            }
         }
 
         if options.dry_run {
@@ -433,7 +511,12 @@ impl Builder {
         let script_path = temp_dir.join("builder.sh");
         std::fs::write(&script_path, &build_script).map_err(Error::IoError)?;
 
-        let mut cmd = Command::new("/bin/bash");
+        let bash_bin = if Path::new("/bin/bash").exists() {
+            "/bin/bash"
+        } else {
+            "bash"
+        };
+        let mut cmd = Command::new(bash_bin);
         cmd.arg("-e").arg(&script_path);
         cmd.current_dir(&temp_dir);
         cmd.envs(&cmd_env);
@@ -487,6 +570,22 @@ impl Builder {
             size_str
         );
         println!("    Installed to: {}", out_path.blue());
+
+        // Ingest outputs into the local iroh-blobs store (signed if local identity exists; never seeds).
+        for path_str in output_paths.values() {
+            if let Err(e) =
+                self.store
+                    .ingest_built_path(Path::new(path_str), Some(drv_path.clone()), true)
+                && options.verbose
+            {
+                println!(
+                    "    {} failed to ingest {} into blob store: {}",
+                    "warning:".yellow().bold(),
+                    path_str,
+                    e
+                );
+            }
+        }
 
         // Create result symlink
         if let Some(link) = &options.out_link {
@@ -709,5 +808,70 @@ fn compute_dir_size_str(path: &Path) -> String {
         format!("{:.1} KB", total_bytes as f64 / 1024.0)
     } else {
         format!("{} bytes", total_bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::eval::Evaluator;
+
+    #[test]
+    fn test_builder_ingests_and_rematerializes_from_iroh_blobs() {
+        let dir_name = format!("rix-builder-test-{}", std::process::id());
+        let base = std::env::temp_dir().join(dir_name);
+        let _ = std::fs::remove_dir_all(&base);
+        let store_dir = base.join("store");
+        let blobs_dir = base.join("blobs");
+        let store = Store::with_dirs(&store_dir, &blobs_dir);
+        let builder = Builder::with_store(store);
+
+        let evaluator = Evaluator::new();
+        let marker = base.join("built-count.txt");
+        let drv_expr = format!(
+            r#"{{
+                type = "derivation";
+                name = "hello-blobs";
+                system = "{}";
+                builder = "/bin/sh";
+                buildCommand = "echo built >> {} && mkdir -p $out/bin && printf 'hi\n' > $out/bin/msg";
+            }}"#,
+            Platform::current().triple(),
+            marker.display()
+        );
+        let val = evaluator.evaluate(&drv_expr).unwrap();
+        let opts = BuildOptions {
+            out_link: None,
+            p2p: false,
+            ..Default::default()
+        };
+
+        // 1. Initial build runs buildCommand and ingests output into iroh-blobs.
+        let res1 = builder.build(&evaluator, &val, &opts).unwrap();
+        assert!(!res1.cached);
+        let out_path = res1.outputs.get("out").unwrap().clone();
+        assert_eq!(
+            std::fs::read_to_string(out_path.join("bin/msg")).unwrap(),
+            "hi\n"
+        );
+
+        // 2. Delete the materialized store directory on disk.
+        std::fs::remove_dir_all(&out_path).unwrap();
+        assert!(!out_path.exists());
+
+        // 3. Rebuilding restores from iroh-blobs without re-running buildCommand!
+        let res2 = builder.build(&evaluator, &val, &opts).unwrap();
+        assert!(
+            res2.cached,
+            "expected output to be restored from iroh-blobs"
+        );
+        assert_eq!(
+            std::fs::read_to_string(out_path.join("bin/msg")).unwrap(),
+            "hi\n"
+        );
+        let build_lines = std::fs::read_to_string(&marker).unwrap();
+        assert_eq!(build_lines.lines().count(), 1);
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

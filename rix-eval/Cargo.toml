@@ -29,6 +29,7 @@ flate2.workspace = true
 tar.workspace = true
 colored.workspace = true
 rix-parser.workspace = true
+rix-store.workspace = true
 annotate-snippets.workspace = true
 parking_lot.workspace = true
 

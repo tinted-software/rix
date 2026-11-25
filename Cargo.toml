@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["rix-eval", "rix-parser", "rix-cli"]
+members = ["rix-eval", "rix-parser", "rix-cli", "rix-store"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +11,7 @@ repository = "https://github.com/Sunrise-OS/rix"
 [workspace.dependencies]
 rix-parser = { path = "rix-parser" }
 rix-eval = { path = "rix-eval" }
+rix-store = { path = "rix-store" }
 usage = { package = "usage-rs", version = "6.9.1" }
 thiserror = "2.0.20"
 rootcause = "0.13.0"
@@ -37,6 +38,15 @@ flate2 = { version = "1.1.10", features = ["zlib-rs"], default-features = false 
 tar = "0.4"
 colored = "2.2"
 parking_lot = "0.12"
+iroh = "1"
+iroh-blobs = { version = "0.103", features = ["fs-store"] }
+iroh-mainline-address-lookup = "0.6"
+n0-mainline = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "io-util", "fs"] }
+postcard = { version = "1", features = ["alloc"] }
+bytes = "1"
+futures-lite = "2"
+tempfile = "3"
 
 [profile.dev.package."*"]
 opt-level = 3
@@ -44,6 +54,7 @@ opt-level = 3
 [profile.dev]
 opt-level = 2
 split-debuginfo = "packed"
+debug = "line-tables-only"
 
 [profile.release]
 lto = "thin"

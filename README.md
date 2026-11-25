@@ -51,3 +51,24 @@ Without an explicit runner, same-OS foreign-CPU builds (for example
 emulator, and other combinations only warn that host binaries cannot run.
 Rix deliberately does not guess a runner from `PATH` so that a misconfigured
 cross build fails loudly rather than silently doing the wrong thing.
+
+## `iroh-blobs` Store & P2P Substitution
+
+Rix backs its Nix-like store (`~/.rix/store` or `/nix/store`) with an
+`iroh-blobs` content-addressed store (`~/.rix/blobs`) using JSON
+`StoreManifest`s instead of NAR archives:
+
+- File payloads are stored once as BLAKE3-verified blobs and referenced from a
+  `HashSeq` (`BlobFormat::HashSeq`) alongside the `StoreManifest` (tracking
+  directory structure, executable bits, symlinks, and store references).
+- Locally built outputs are ingested into `iroh-blobs` and can be
+  re-materialized onto disk without rebuilding.
+- **Opt-in seeding (`rix seed`)**: Seeding is disabled by default for bandwidth
+  and privacy/security reasons. Run `rix seed` when you explicitly want to
+  serve your store over `iroh` (`/rix/p2p/1` + `iroh-blobs`) and announce
+  signed BEP 44 records to the BitTorrent Mainline DHT.
+- **Trusted P2P substitution**: When peers or trusted public keys are
+  configured in `~/.rix/config.toml` (via `rix p2p trust <PUBKEY>` /
+  `rix p2p add-peer <ENDPOINT_ID>`) or passed via `--peer` / `--trusted-key`,
+  `rix build` attempts P2P substitution before building locally. Unsigned or
+  untrusted manifests are rejected unless `--allow-untrusted` is explicitly set.
